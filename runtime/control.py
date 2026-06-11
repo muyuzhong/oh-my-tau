@@ -54,7 +54,12 @@ class ControlPlane:
         commands = []
         while True:
             try:
-                commands.append(self._queue.get_nowait())
+                command = self._queue.get_nowait()
+                commands.append(command)
+                # Pause 是一个同步屏障。后续 Resume 必须留在队列中供 wait_resume
+                # 消费，否则 Pause/Resume 连续提交时会丢失恢复信号并永久阻塞。
+                if isinstance(command, Pause):
+                    return commands
             except asyncio.QueueEmpty:
                 return commands
 
