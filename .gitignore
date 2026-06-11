@@ -5,3 +5,4 @@ venv/
 .env
 sessions/
 .pytest_cache/
+*.egg-info/
