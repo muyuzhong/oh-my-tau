@@ -52,6 +52,9 @@ class StopReason(str, Enum):
     SUPERVISOR_TERMINATE = "supervisor_terminate"
     FATAL = "fatal"
 
+    def __str__(self) -> str:        # 见下方「显示」说明：让 str()/format()/f-string 都渲染为值
+        return self.value
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -61,7 +64,9 @@ class RunResult:
     detail: Optional[str] = None   # 非错误终止的具体说明：supervisor 的 constraint:max_tool_calls(52) 等
 ```
 
-The member set is exactly the reasons currently produced by `engine.py`. `StopReason(str, Enum)` means `StopReason.COMPLETED == "completed"` is `True`, so any existing string comparison keeps working.
+The member set is exactly the reasons currently produced by `engine.py`. `StopReason(str, Enum)` means `StopReason.COMPLETED == "completed"` is `True`, so any existing `==` comparison keeps working (all 9 existing assertions, verified).
+
+**显示（cross-version, verified on 3.13）:** without an explicit `__str__`, a bare `(str, Enum)` renders its *name* under `str()`/`format()`/f-strings — on this machine `f"{StopReason.COMPLETED}"` → `"StopReason.COMPLETED"`, which would regress the CLI line `cli/repl.py:85` (`f"本轮结束（{event.reason}）"`) to show `StopReason.COMPLETED`. (Python 3.11+ made `Enum.__format__` mirror `__str__`; ≤3.10 differs again — so relying on the default is version-fragile.) Defining `__str__` to return `self.value` makes `==`, `str()`, `format()`, and f-strings all render `"completed"` across 3.10–3.13, so **`cli/repl.py` needs no change** and back-compat is truly zero-churn. The equality used by tests is unaffected either way.
 
 ## 2. `AgentEnded` evolution + back-compat — `runtime/events.py`
 
@@ -140,7 +145,7 @@ Test **observable behavior**, not internals (dev-guide §7 / §4.3).
   - `USER_ABORT` (control test): `reason is StopReason.USER_ABORT`; `final_message_id is None` when aborted before any assistant message.
 - **Supervisor terminate:** drive `ConstraintValidator(max_total_tool_calls=...)` to fire, assert `reason is StopReason.SUPERVISOR_TERMINATE` and `detail.startswith("constraint:")`.
 - **Fatal does not escape:** inject a provider that raises a non-`ProviderError` exception mid-loop; assert the generator completes normally (no raise), the last event is `AgentEnded`, `reason is StopReason.FATAL`, and `error` is non-empty. This locks the §14.10 "异常绝不逃逸" invariant.
-- **Unit `test_result.py`:** `StopReason.COMPLETED == "completed"` (the back-compat property); `RunResult` is frozen and defaults `error`/`detail`/`final_message_id` to `None`.
+- **Unit `test_result.py`:** `StopReason.COMPLETED == "completed"` (the back-compat property); `str(StopReason.COMPLETED) == "completed"` and `f"{StopReason.COMPLETED}" == "completed"` (locks the cross-version display so the CLI line cannot silently regress to `StopReason.COMPLETED`); `RunResult` is frozen and defaults `error`/`detail`/`final_message_id` to `None`.
 
 ## 6. Verification gate (dev-guide §7)
 
@@ -166,3 +171,4 @@ A change is "done" only when all three pass and the report states what changed, 
 - **Internal consistency:** the `StopReason` member set equals the strings enumerated in §3; the mapping table (§4) covers every member; back-compat claim (§0.1, §2, §5) rests on `str`-enum equality and is itself tested.
 - **Scope check:** single focused change (one new module + two edited files + tests), well inside one implementation plan; A/B/D/E explicitly deferred.
 - **Ambiguity check:** `final_message_id` "this run, else None" is made explicit; `error` vs `detail` population is pinned per-row in §4; `error` intentionally duplicating the prior `ErrorEvent` message is called out.
+- **Cross-version display (found during planning):** a bare `(str, Enum)` renders its name (not value) under `str()`/f-strings on 3.11+ (verified `StopReason.COMPLETED` on 3.13), which would regress the CLI display; resolved by an explicit `__str__` returning `self.value` (§1), and locked by a unit test (§5). This is why `cli/repl.py` stays untouched.
