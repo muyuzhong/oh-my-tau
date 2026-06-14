@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 
 from rich.console import Console
 from rich.panel import Panel
@@ -20,6 +21,7 @@ from runtime import events as ev
 from runtime.context import TokenLedger
 from runtime.control import Abort, Approve, ControlPlane, Deny, Steer
 from runtime.engine import AgentLoop
+from runtime.execution_env import LocalExecutionEnv
 from runtime.executor import ToolRegistry
 from runtime.state import SessionState
 from tools.builtin import ReadFileTool, RunCommandTool
@@ -86,7 +88,8 @@ async def render_events(run, console, control, listener):
 async def main():
     console = Console()
     provider, model = make_provider()
-    registry = ToolRegistry(); registry.register(ReadFileTool()); registry.register(RunCommandTool())
+    env = LocalExecutionEnv(root=Path.cwd())
+    registry = ToolRegistry(); registry.register(ReadFileTool(env)); registry.register(RunCommandTool(env))
     state, ledger = SessionState(), TokenLedger()
     console.print(Panel(f"provider={type(provider).__name__} model={model}\n命令：/status /resume <id> /quit", title="Mono"))
     while True:
