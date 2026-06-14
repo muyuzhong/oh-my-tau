@@ -30,6 +30,17 @@ async def test_read_text_allows_in_root(tmp_path):
     assert result.ok and result.content == "内部"
 
 
+async def test_read_text_resolves_relative_path_from_root(tmp_path, monkeypatch):
+    root = tmp_path / "ws"; root.mkdir()
+    inside = root / "ok.txt"; inside.write_text("内部", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    result = await LocalExecutionEnv(root=root).read_text("ok.txt")
+
+    assert result.ok and result.content == "内部"
+
+
 async def test_run_shell_success():
     result = await LocalExecutionEnv().run_shell("echo mono-shell", timeout=30)
     assert result.ok and result.exit_code == 0 and "mono-shell" in result.output

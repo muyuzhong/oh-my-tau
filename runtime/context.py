@@ -10,6 +10,10 @@ from runtime.blocks import Message, TextBlock, ToolResultBlock, Usage, estimate_
 TRUNCATE_LIMIT = 200
 
 
+class ContextOverflowError(Exception):
+    """上下文经过最小压缩后仍无法装入模型窗口。"""
+
+
 class TokenLedger:
     """任务级预算使用真实 Usage 记账，达到任一上限即停止。"""
     def __init__(self, max_total_tokens=1_000_000, max_api_calls=100):
@@ -67,21 +71,23 @@ def _snip(messages, keep_recent):
 
 
 class ContextAssembler:
-    """组装请求；超过阈值时依次截断工具结果、裁剪早期历史。"""
+    """从完整消息历史派生模型请求，不修改调用者持有的会话状态。"""
     def __init__(self, system_prompt, registry=None, model="mock-model", max_tokens=4096,
                  context_window=200_000, compact_threshold=.8, keep_recent=8):
         self.system_prompt, self.registry, self.model, self.max_tokens = system_prompt, registry, model, max_tokens
         self.context_window, self.compact_threshold, self.keep_recent = context_window, compact_threshold, keep_recent
     def _estimate(self, messages, tools):
         return sum(estimate_tokens(message) for message in messages) + len(json.dumps(tools, ensure_ascii=False)) // 4 + len(self.system_prompt) // 4
-    def build(self, state):
+    def build(self, complete_messages):
         tools = self.registry.schemas() if self.registry else []
-        messages, before = state.messages, self._estimate(state.messages, tools)
+        messages = list(complete_messages)
+        before = self._estimate(messages, tools)
         info = None
         if before > self.context_window * self.compact_threshold:
             messages = _truncate(messages, self.keep_recent)
             if self._estimate(messages, tools) > self.context_window * self.compact_threshold:
                 messages = _snip(messages, self.keep_recent)
-            state.messages = messages
             info = (before, self._estimate(messages, tools))
-        return ModelRequest(self.system_prompt, list(messages), tools, self.model, self.max_tokens), info
+        if self._estimate(messages, tools) > self.context_window:
+            raise ContextOverflowError("上下文压缩后仍超过模型窗口")
+        return ModelRequest(self.system_prompt, messages, tools, self.model, self.max_tokens), info

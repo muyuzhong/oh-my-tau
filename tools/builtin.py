@@ -50,5 +50,8 @@ class RunCommandTool(Tool):
     async def call(self, params):
         start = time.perf_counter()
         result = await self.env.run_shell(params["command"], timeout=self.timeout_seconds)
-        return ToolResult(result.ok, f"[exit {result.exit_code}]\n{result.output}", time.perf_counter() - start,
-                          None if result.ok else "NonZeroExit")
+        details = result.output
+        if result.error:
+            details = f"{result.error}\n{details}" if details else result.error
+        return ToolResult(result.ok, f"[exit {result.exit_code}]\n{details}", time.perf_counter() - start,
+                          None if result.ok else "ShellError")

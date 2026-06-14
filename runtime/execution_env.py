@@ -49,20 +49,24 @@ class LocalExecutionEnv(ExecutionEnv):
     def __init__(self, root: Optional[Path] = None):
         self.root = Path(root).resolve() if root is not None else None
 
-    def _within_root(self, path: str) -> bool:
-        if self.root is None:
-            return True
+    def _resolve_path(self, path: str) -> Optional[Path]:
         try:
-            resolved = Path(path).resolve()
+            candidate = Path(path)
+            if self.root is not None and not candidate.is_absolute():
+                candidate = self.root / candidate
+            return candidate.resolve()
         except OSError:
-            return False
-        return resolved == self.root or self.root in resolved.parents
+            return None
+
+    def _within_root(self, path: Path) -> bool:
+        return self.root is None or path == self.root or self.root in path.parents
 
     async def read_text(self, path: str) -> ReadResult:
-        if not self._within_root(path):
+        resolved = self._resolve_path(path)
+        if resolved is None or not self._within_root(resolved):
             return ReadResult(False, "", f"路径越界，超出工作区根：{path}")
         try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
+            text = resolved.read_text(encoding="utf-8", errors="replace")
         except OSError as error:
             return ReadResult(False, "", str(error))
         return ReadResult(True, text)
@@ -115,12 +119,23 @@ class LocalExecutionEnv(ExecutionEnv):
     async def _terminate(process) -> None:
         """杀掉子进程并轮询回收；不用 await process.wait()（原因见 run_shell 注释）。"""
         if process.returncode is not None:
+            LocalExecutionEnv._close_pipes(process)
             return
         try:
             process.kill()
         except ProcessLookupError:
+            LocalExecutionEnv._close_pipes(process)
             return
         waited = 0.0
         while process.returncode is None and waited < 2.0:
             await asyncio.sleep(0.05)
             waited += 0.05
+        LocalExecutionEnv._close_pipes(process)
+
+    @staticmethod
+    def _close_pipes(process) -> None:
+        """终止路径主动关闭管道，避免 Windows Proactor transport 延迟回收。"""
+        for stream in (process.stdout, process.stderr):
+            transport = getattr(stream, "_transport", None)
+            if transport is not None:
+                transport.close()

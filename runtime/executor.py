@@ -40,9 +40,8 @@ class ToolRegistry:
 
 
 class ToolExecutor:
-    def __init__(self, registry: ToolRegistry, max_concurrent: int = 5, sleep=None):
+    def __init__(self, registry: ToolRegistry, max_concurrent: int = 5):
         self.registry, self.max_concurrent = registry, max_concurrent
-        self.sleep = sleep or asyncio.sleep
         self._sem = None
 
     def _semaphore(self):
@@ -62,15 +61,12 @@ class ToolExecutor:
             return ToolResultBlock(call.id, "参数校验失败：\n" + "\n".join(errors), True, "ParameterValidation")
         timeout = getattr(tool, "timeout_seconds", 30)
         async with self._semaphore():
-            for attempt in (1, 2):
-                try:
-                    result = await asyncio.wait_for(tool.call(call.input), timeout)
-                    if isinstance(result, ToolResult):
-                        return ToolResultBlock(call.id, str(result.content), not result.success, result.error_type)
-                    return ToolResultBlock(call.id, str(result))
-                except asyncio.TimeoutError:
-                    if attempt == 2:
-                        return ToolResultBlock(call.id, f"工具执行超时（>{timeout}s，已重试 1 次）", True, "ToolTimeout")
-                    await self.sleep(.5)
-                except Exception as error:
-                    return ToolResultBlock(call.id, f"{type(error).__name__}: {error}", True, type(error).__name__)
+            try:
+                result = await asyncio.wait_for(tool.call(call.input), timeout)
+                if isinstance(result, ToolResult):
+                    return ToolResultBlock(call.id, str(result.content), not result.success, result.error_type)
+                return ToolResultBlock(call.id, str(result))
+            except asyncio.TimeoutError:
+                return ToolResultBlock(call.id, f"工具执行超时（>{timeout}s）", True, "ToolTimeout")
+            except Exception as error:
+                return ToolResultBlock(call.id, f"{type(error).__name__}: {error}", True, type(error).__name__)

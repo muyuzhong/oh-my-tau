@@ -1,7 +1,8 @@
-from providers.base import ProviderAuthError, RateLimitError
+from providers.base import MessageEnd, MessageStart, ProviderAuthError, RateLimitError, TextDelta
 from providers.mock import MockProvider
 from runtime import events as ev
-from runtime.context import RetryPolicy, TokenLedger
+from runtime.blocks import Usage
+from runtime.context import ContextAssembler, RetryPolicy, TokenLedger
 from runtime.engine import AgentLoop
 from runtime.executor import ToolRegistry
 from runtime.state import SessionState
@@ -60,3 +61,26 @@ async def test_token_budget_stops_loop(tmp_path):
 async def test_max_turns(tmp_path):
     loop, _ = make_loop(tmp_path, [MockProvider.tool_turn("echo", {"text": "a"})] * 2, [EchoTool()], max_turns=2)
     assert (await collect(loop.run("hi")))[-1].reason == "max_turns"
+
+
+async def test_max_tokens_is_not_reported_as_completed(tmp_path):
+    truncated = [MessageStart("mock-model"), TextDelta("未完成"), MessageEnd("max_tokens", Usage(1, 5))]
+    loop, _ = make_loop(tmp_path, [truncated])
+    assert (await collect(loop.run("hi")))[-1].reason == "max_tokens"
+
+
+async def test_incomplete_provider_stream_is_not_reported_as_completed(tmp_path):
+    incomplete = [MessageStart("mock-model"), TextDelta("半截")]
+    loop, _ = make_loop(tmp_path, [incomplete])
+    events = await collect(loop.run("hi"))
+    assert events[-1].reason == "incomplete_stream"
+    assert len(loop.state.messages) == 1
+
+
+async def test_context_overflow_ends_with_explicit_reason(tmp_path):
+    assembler = ContextAssembler("s", context_window=100, keep_recent=2)
+    loop, _ = make_loop(tmp_path, [MockProvider.text_turn("不会调用")], assembler=assembler)
+    events = await collect(loop.run("x" * 10_000))
+    assert events[-1].reason == "context_overflow"
+    assert loop.provider.requests == []
+    assert len(loop.state.messages) == 1

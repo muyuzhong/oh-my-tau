@@ -59,3 +59,31 @@ async def test_unattended_tools_do_not_need_approval(tmp_path):
     loop, _ = make_loop(tmp_path, [MockProvider.tool_turn("echo", {"text": "safe"}), MockProvider.text_turn("done")], [EchoTool()])
     events = [event async for event in loop.run("hi")]
     assert not any(isinstance(event, ev.ApprovalRequested) for event in events)
+
+
+async def test_tool_requiring_approval_is_denied_without_control_plane(tmp_path):
+    class CountingDangerTool(DangerTool):
+        calls = 0
+
+        async def call(self, params):
+            type(self).calls += 1
+            return await super().call(params)
+
+    registry = ToolRegistry()
+    registry.register(CountingDangerTool())
+    loop = AgentLoop(
+        MockProvider([MockProvider.tool_turn("danger", {"text": "rm"}, "d1"), MockProvider.text_turn("拒绝后继续")]),
+        registry,
+        state=SessionState(transcript_dir=str(tmp_path)),
+        retry_policy=RetryPolicy(sleep=FakeSleep()),
+    )
+
+    events = [event async for event in loop.run("执行")]
+
+    assert CountingDangerTool.calls == 0
+    assert events[-1].reason == "completed"
+    assert any(
+        getattr(block, "error_type", None) == "PermissionDenied"
+        for message in loop.provider.requests[1].messages
+        for block in message.content
+    )

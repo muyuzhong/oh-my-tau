@@ -1,7 +1,7 @@
 # Runtime Kernel — Issue Fixes (Issues 3, 4, 5)
 
 - Date: 2026-06-14
-- Status: design, awaiting implementation
+- Status: implemented and hardened
 - Scope: **Runtime Kernel layer only** (per project scope split; HarnessSession and above are another owner's layer)
 - Authoritative architecture: `docs/2026-06-14-initial-architecture-decisions.md` §14 (ADR-011..015). This spec is the *implementation-level* plan for the kernel-side portions of §3.2 问题三/四/五.
 
@@ -17,7 +17,10 @@ The five issues in §3.2 were verified against current code. They split by layer
 | #4 duplicate `core` vs `runtime` types | exists — orphan files, zero main-chain consumers | **Delete orphans** (ADR-013). |
 | #5 unsafe built-in tools | exists (`builtin.py:17,32`; no capability boundary; subprocess survives cancel) | **Inject `ExecutionEnv` port + safe tools + cancellation** (ADR-014). |
 
-This spec fixes **#3 (lock), #4, #5**. It explicitly does **not** build HarnessSession, extract `run_one_turn`/`TurnSnapshot`/`RunResult`, or move history ownership out of the kernel — those are §14.8 migration steps that require the harness layer as their consumer and are out of this session's scope.
+This spec fixes **#3 (lock), #4, #5**. Follow-up review also hardened workspace-relative path resolution,
+Shell error propagation, and Windows subprocess-pipe cleanup. It explicitly does **not** build HarnessSession,
+extract `run_one_turn`/`TurnSnapshot`/`RunResult`, or move history ownership out of the kernel — those are §14.8
+migration steps that require the harness layer as their consumer and are out of this session's scope.
 
 ## 1. Issue 4 — delete orphan `core` types (ADR-013)
 
@@ -76,7 +79,7 @@ No production-code change.
 ## 4. Verification gate (dev-guide §7)
 
 ```
-python -m pytest -q                # expect 67 prior + new tests, all green
+python -m pytest -q                # 80 passed
 python -m compileall -q core runtime providers tools cli tests
 git diff --check
 ```

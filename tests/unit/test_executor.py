@@ -3,7 +3,7 @@ import asyncio
 from core.tool import ToolResult
 from runtime.blocks import ToolUseBlock
 from runtime.executor import ToolExecutor, ToolRegistry, validate_params
-from tests.helpers import EchoTool, FakeSleep
+from tests.helpers import EchoTool
 
 
 def make_executor(*tools, **kwargs):
@@ -43,7 +43,7 @@ async def test_exception_becomes_observation():
     assert result.error_type == "RuntimeError" and "炸了" in result.content
 
 
-async def test_timeout_retries_once_then_errors():
+async def test_timeout_does_not_retry_tool_with_possible_side_effects():
     class Slow(EchoTool):
         timeout_seconds = .01
         calls = 0
@@ -51,9 +51,8 @@ async def test_timeout_retries_once_then_errors():
         async def call(self, params):
             type(self).calls += 1
             await asyncio.sleep(1)
-    sleep = FakeSleep()
-    result = await make_executor(Slow(), sleep=sleep).execute_one(ToolUseBlock("slow", {"text": "x"}, "t5"))
-    assert result.error_type == "ToolTimeout" and Slow.calls == 2 and sleep.calls == [.5]
+    result = await make_executor(Slow()).execute_one(ToolUseBlock("slow", {"text": "x"}, "t5"))
+    assert result.error_type == "ToolTimeout" and Slow.calls == 1
 
 
 async def test_execute_all_concurrent_and_ordered():

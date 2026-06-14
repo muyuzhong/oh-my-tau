@@ -41,3 +41,13 @@ async def test_run_command_routes_through_env():
     env = FakeExecutionEnv(shell_result=ShellResult(True, 0, "假输出"))
     result = await RunCommandTool(env).call({"command": "ls"})
     assert result.success and "假输出" in result.content and env.shells == [("ls", 30)]
+
+
+async def test_run_command_preserves_env_error_for_model_recovery():
+    env = FakeExecutionEnv(shell_result=ShellResult(False, -1, "", "命令执行超时（>30s）"))
+
+    result = await RunCommandTool(env).call({"command": "slow"})
+
+    assert not result.success
+    assert "命令执行超时" in result.content
+    assert result.error_type == "ShellError"

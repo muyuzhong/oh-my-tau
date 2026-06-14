@@ -1,7 +1,7 @@
-"""SessionState：append-only 消息历史与 JSONL 转录。
+"""SessionState：append-only 完整消息历史与 JSONL 转录。
 
 转录文件本身就是最低成本的检查点：每条完整消息独占一行 JSON，进程恢复时
-按顺序重放即可。上下文压缩只改变内存工作集，不会删除转录中的原始历史。
+按顺序重放即可。上下文构建只能派生模型请求，不能修改这里保存的完整历史。
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from runtime.blocks import Message
 
 
 class SessionState:
-    """维护当前会话的内存消息列表和持久化转录。"""
+    """维护当前会话完整的内存消息历史和持久化转录。"""
 
     def __init__(self, session_id: Optional[str] = None, transcript_dir: str = "sessions"):
         self.session_id = session_id or f"sess_{uuid.uuid4().hex[:8]}"
@@ -26,7 +26,7 @@ class SessionState:
         return self.transcript_dir / f"{self.session_id}.jsonl"
 
     def append(self, message: Message) -> None:
-        """先加入工作集，再将同一条完整消息追加到转录末尾。"""
+        """先加入完整内存历史，再将同一条消息追加到转录末尾。"""
         self.messages.append(message)
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
         with open(self.transcript_path, "a", encoding="utf-8") as transcript:

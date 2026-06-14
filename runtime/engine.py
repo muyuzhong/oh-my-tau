@@ -5,7 +5,7 @@ import json
 
 from providers.base import MessageEnd, ProviderError, TextDelta, ThinkingDelta, ToolInputDelta, ToolUseEnd, ToolUseStart
 from runtime.blocks import Message, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock
-from runtime.context import ContextAssembler, RetryPolicy, TokenLedger
+from runtime.context import ContextAssembler, ContextOverflowError, RetryPolicy, TokenLedger
 from runtime.control import Abort, Approve, Pause, Steer
 from runtime import events as ev
 from runtime.executor import ToolExecutor, ToolRegistry
@@ -45,6 +45,9 @@ class StreamAccumulator:
         self._flush_text()
         return Message.assistant(self.blocks, self.usage)
 
+    def is_complete(self):
+        return self.stop_reason is not None and not self._open_tools
+
 
 class AgentLoop:
     """以异步生成器发布所有进度；控制面和监督者均为可选依赖。"""
@@ -77,7 +80,12 @@ class AgentLoop:
                     if self.control.abort_requested: reason = "user_abort"; break
                 if not self.ledger.budget_ok(): reason = "token_budget"; break
                 yield ev.TurnStarted(turn)
-                request, compacted = self.assembler.build(self.state)
+                try:
+                    request, compacted = self.assembler.build(self.state.messages)
+                except ContextOverflowError as error:
+                    yield ev.ErrorEvent(type(error).__name__, str(error))
+                    reason = "context_overflow"
+                    break
                 if compacted: yield ev.ContextCompacted(*compacted)
 
                 attempt = 0
@@ -100,17 +108,24 @@ class AgentLoop:
                 if aborted: reason = "user_abort"; break
                 if fatal:
                     yield ev.ErrorEvent(type(fatal).__name__, str(fatal)); reason = "provider_error"; break
+                if not accumulator.is_complete():
+                    yield ev.ErrorEvent("IncompleteStream", "Provider 流未正常结束")
+                    reason = "incomplete_stream"
+                    break
 
                 message = accumulator.result()
                 if accumulator.usage: self.ledger.record(accumulator.usage)
                 self.state.append(message)
                 yield ev.AssistantMessageEnd(accumulator.stop_reason or "end_turn")
+                if accumulator.stop_reason == "max_tokens":
+                    reason = "max_tokens"
+                    break
                 calls = message.get_tool_calls()
                 if not calls: reason = "completed"; break
 
                 needs, approved, denied = [c for c in calls if self._needs_approval(c)], [c for c in calls if not self._needs_approval(c)], []
                 if needs:
-                    if not self.control: approved += needs
+                    if not self.control: denied += needs
                     else:
                         yield ev.ApprovalRequested(needs)
                         pending, approved_ids = {c.id for c in needs}, set()
