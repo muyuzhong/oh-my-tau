@@ -1,7 +1,7 @@
 # Runtime Kernel — Structured `RunResult` Termination (ADR-015)
 
 - Date: 2026-06-15
-- Status: design approved, ready for implementation plan
+- Status: implemented (2026-06-16); see docs/superpowers/plans/2026-06-16-runtime-kernel-runresult.md
 - Scope: **Runtime Kernel layer only** (per project scope split; HarnessSession and above are another owner's layer)
 - Authoritative architecture: `docs/2026-06-14-initial-architecture-decisions.md` §14.7 / ADR-015 (and ADR-008's `RunResult` sketch). This spec is the *implementation-level* plan for the kernel-side "structured termination" item (gap **C** in the 2026-06-15 kernel gap review).
 

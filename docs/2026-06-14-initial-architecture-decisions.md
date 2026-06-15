@@ -856,6 +856,8 @@ ADR-008 的三类错误在内核中的精确映射：
 
 **后果**：`AgentEnded(reason)` 演进为携带 `RunResult`；终止原因集合收敛为枚举，纳入测试断言。
 
+**实现状态（2026-06-16）**：已实现。`runtime/result.py` 定义 `StopReason` 与 `RunResult`，`AgentEnded` 携带 `RunResult` 并保留 `.reason` 兼容属性；`engine.run` 收敛为单一结构化出口。gap C 关闭；A/B/D/E 仍按 §14.8 推进。
+
 ### 14.10 内核完成标准与不变量（可测）
 
 内核层（独立于上层）应满足：

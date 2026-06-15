@@ -40,12 +40,13 @@ Mono 的长期目标是一个能够日常使用的 Coding Agent。
 - JSONL 会话转录
 - 基础监督策略
 - ExecutionEnv 副作用能力边界与工作区约束
+- 结构化运行终止 RunResult（ADR-015）
 
 当前验证基线：
 
 ```text
 python -m pytest -q
-80 passed
+87 passed
 ```
 
 Runtime 现在负责完成一轮轮推理和工具执行。它不应该继续吸收会话产品、项目规则、
