@@ -5,6 +5,7 @@ from runtime.blocks import Usage
 from runtime.context import ContextAssembler, RetryPolicy, TokenLedger
 from runtime.engine import AgentLoop
 from runtime.executor import ToolRegistry
+from runtime.result import StopReason
 from runtime.state import SessionState
 from tests.helpers import EchoTool, FakeSleep, collect
 
@@ -21,6 +22,11 @@ async def test_text_only_completes(tmp_path):
     loop, _ = make_loop(tmp_path, [MockProvider.text_turn("你好")])
     events = await collect(loop.run("hi"))
     assert events[-1].reason == "completed" and len(loop.state.messages) == 2
+    # 结构化结果：COMPLETED 无 error/detail，final_message_id 指向本轮最后一条 assistant 消息。
+    result = events[-1].result
+    assert result.reason is StopReason.COMPLETED
+    assert result.error is None and result.detail is None
+    assert result.final_message_id == loop.state.messages[-1].message_id
 
 
 async def test_tool_roundtrip(tmp_path):
@@ -38,7 +44,10 @@ async def test_retryable_error_then_success(tmp_path):
 
 async def test_non_retryable_error_ends_run(tmp_path):
     loop, _ = make_loop(tmp_path, [ProviderAuthError("bad")])
-    assert (await collect(loop.run("hi")))[-1].reason == "provider_error"
+    events = await collect(loop.run("hi"))
+    assert events[-1].reason == "provider_error"
+    assert events[-1].result.reason is StopReason.PROVIDER_ERROR
+    assert events[-1].result.error  # 非空：携带 provider 错误信息
 
 
 async def test_broken_tool_json_fed_back_as_error(tmp_path):
@@ -55,18 +64,27 @@ async def test_broken_tool_json_fed_back_as_error(tmp_path):
 
 async def test_token_budget_stops_loop(tmp_path):
     loop, _ = make_loop(tmp_path, [MockProvider.tool_turn("echo", {"text": "a"})], [EchoTool()], ledger=TokenLedger(max_api_calls=1))
-    assert (await collect(loop.run("hi")))[-1].reason == "token_budget"
+    events = await collect(loop.run("hi"))
+    assert events[-1].reason == "token_budget"
+    assert events[-1].result.reason is StopReason.TOKEN_BUDGET
+    assert events[-1].result.error is None and events[-1].result.detail is None
 
 
 async def test_max_turns(tmp_path):
     loop, _ = make_loop(tmp_path, [MockProvider.tool_turn("echo", {"text": "a"})] * 2, [EchoTool()], max_turns=2)
-    assert (await collect(loop.run("hi")))[-1].reason == "max_turns"
+    events = await collect(loop.run("hi"))
+    assert events[-1].reason == "max_turns"
+    assert events[-1].result.reason is StopReason.MAX_TURNS
+    assert events[-1].result.error is None and events[-1].result.detail is None
 
 
 async def test_max_tokens_is_not_reported_as_completed(tmp_path):
     truncated = [MessageStart("mock-model"), TextDelta("未完成"), MessageEnd("max_tokens", Usage(1, 5))]
     loop, _ = make_loop(tmp_path, [truncated])
-    assert (await collect(loop.run("hi")))[-1].reason == "max_tokens"
+    events = await collect(loop.run("hi"))
+    assert events[-1].reason == "max_tokens"
+    assert events[-1].result.reason is StopReason.MAX_TOKENS
+    assert events[-1].result.error is None
 
 
 async def test_incomplete_provider_stream_is_not_reported_as_completed(tmp_path):
@@ -75,6 +93,9 @@ async def test_incomplete_provider_stream_is_not_reported_as_completed(tmp_path)
     events = await collect(loop.run("hi"))
     assert events[-1].reason == "incomplete_stream"
     assert len(loop.state.messages) == 1
+    assert events[-1].result.reason is StopReason.INCOMPLETE_STREAM
+    assert events[-1].result.error == "Provider 流未正常结束"
+    assert events[-1].result.final_message_id is None  # 未产出 assistant 消息
 
 
 async def test_context_overflow_ends_with_explicit_reason(tmp_path):
@@ -84,3 +105,6 @@ async def test_context_overflow_ends_with_explicit_reason(tmp_path):
     assert events[-1].reason == "context_overflow"
     assert loop.provider.requests == []
     assert len(loop.state.messages) == 1
+    assert events[-1].result.reason is StopReason.CONTEXT_OVERFLOW
+    assert events[-1].result.error  # 非空：携带溢出信息
+    assert events[-1].result.final_message_id is None

@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 from typing import List
 
+from runtime.result import RunResult, StopReason
+
 
 @dataclass
 class AgentStarted: session_id: str
@@ -53,5 +55,9 @@ class ErrorEvent:
     message: str
 @dataclass
 class AgentEnded:
-    """reason 是稳定的机器可读终止原因。"""
-    reason: str
+    """以结构化 RunResult 收尾；.reason 保留给既有消费者（向后兼容）。"""
+    result: RunResult
+
+    @property
+    def reason(self) -> StopReason:
+        return self.result.reason

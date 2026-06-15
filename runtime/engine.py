@@ -9,6 +9,7 @@ from runtime.context import ContextAssembler, ContextOverflowError, RetryPolicy,
 from runtime.control import Abort, Approve, Pause, Steer
 from runtime import events as ev
 from runtime.executor import ToolExecutor, ToolRegistry
+from runtime.result import RunResult, StopReason
 from runtime.state import SessionState
 
 
@@ -66,7 +67,10 @@ class AgentLoop:
     async def run(self, user_input):
         self.state.append(Message.user(user_input))
         yield ev.AgentStarted(self.state.session_id)
-        reason = "max_turns"
+        reason = StopReason.MAX_TURNS
+        error = None
+        detail = None
+        last_assistant_id = None
         try:
             for turn in range(self.max_turns):
                 # 安全点：仅在完整消息之间应用转向、暂停与中断。
@@ -77,14 +81,14 @@ class AgentLoop:
                         elif isinstance(command, Pause):
                             yield ev.Paused()
                             if not isinstance(await self.control.wait_resume(), Abort): yield ev.Resumed()
-                    if self.control.abort_requested: reason = "user_abort"; break
-                if not self.ledger.budget_ok(): reason = "token_budget"; break
+                    if self.control.abort_requested: reason = StopReason.USER_ABORT; break
+                if not self.ledger.budget_ok(): reason = StopReason.TOKEN_BUDGET; break
                 yield ev.TurnStarted(turn)
                 try:
                     request, compacted = self.assembler.build(self.state.messages)
-                except ContextOverflowError as error:
-                    yield ev.ErrorEvent(type(error).__name__, str(error))
-                    reason = "context_overflow"
+                except ContextOverflowError as overflow:
+                    yield ev.ErrorEvent(type(overflow).__name__, str(overflow))
+                    reason = StopReason.CONTEXT_OVERFLOW; error = str(overflow)
                     break
                 if compacted: yield ev.ContextCompacted(*compacted)
 
@@ -99,29 +103,32 @@ class AgentLoop:
                             elif isinstance(stream_event, ThinkingDelta): yield ev.ThinkingDeltaEvent(stream_event.thinking)
                             elif isinstance(stream_event, ToolUseStart): yield ev.ToolCallStarted(stream_event.id, stream_event.name)
                         break
-                    except ProviderError as error:
+                    except ProviderError as provider_error:
                         attempt += 1
-                        if not self.retry.should_retry(error, attempt): fatal = error; break
-                        delay = self.retry.backoff_for(error, attempt)
+                        if not self.retry.should_retry(provider_error, attempt): fatal = provider_error; break
+                        delay = self.retry.backoff_for(provider_error, attempt)
                         yield ev.InferenceRetrying(attempt, delay)
                         await self.retry.sleep(delay)
-                if aborted: reason = "user_abort"; break
+                if aborted: reason = StopReason.USER_ABORT; break
                 if fatal:
-                    yield ev.ErrorEvent(type(fatal).__name__, str(fatal)); reason = "provider_error"; break
+                    yield ev.ErrorEvent(type(fatal).__name__, str(fatal))
+                    reason = StopReason.PROVIDER_ERROR; error = str(fatal)
+                    break
                 if not accumulator.is_complete():
                     yield ev.ErrorEvent("IncompleteStream", "Provider 流未正常结束")
-                    reason = "incomplete_stream"
+                    reason = StopReason.INCOMPLETE_STREAM; error = "Provider 流未正常结束"
                     break
 
                 message = accumulator.result()
                 if accumulator.usage: self.ledger.record(accumulator.usage)
                 self.state.append(message)
+                last_assistant_id = message.message_id
                 yield ev.AssistantMessageEnd(accumulator.stop_reason or "end_turn")
                 if accumulator.stop_reason == "max_tokens":
-                    reason = "max_tokens"
+                    reason = StopReason.MAX_TOKENS
                     break
                 calls = message.get_tool_calls()
-                if not calls: reason = "completed"; break
+                if not calls: reason = StopReason.COMPLETED; break
 
                 needs, approved, denied = [c for c in calls if self._needs_approval(c)], [c for c in calls if not self._needs_approval(c)], []
                 if needs:
@@ -135,7 +142,7 @@ class AgentLoop:
                             ids = set(decision.ids) if decision.ids is not None else set(pending)
                             if isinstance(decision, Approve): approved_ids |= ids & pending
                             pending -= ids
-                        if aborted: reason = "user_abort"; break
+                        if aborted: reason = StopReason.USER_ABORT; break
                         approved += [c for c in needs if c.id in approved_ids]
                         denied = [c for c in needs if c.id not in approved_ids]
                 for call in approved: yield ev.ToolExecutionStarted(call.id, call.name)
@@ -148,11 +155,13 @@ class AgentLoop:
                 self.state.append(Message.tool_results(ordered))
                 if self.supervisor:
                     verdict = self.supervisor.review(self.state)
-                    if verdict.action == "terminate": reason = verdict.reason or "supervisor_terminate"; break
+                    if verdict.action == "terminate":
+                        reason = StopReason.SUPERVISOR_TERMINATE; detail = verdict.reason
+                        break
                     if verdict.action == "inject":
                         self.state.append(Message.user(verdict.message)); yield ev.SupervisorInjected(verdict.reason or "supervisor")
                 yield ev.TurnEnded(turn)
-        except Exception as error:
-            yield ev.ErrorEvent(type(error).__name__, str(error))
-            reason = "fatal"
-        yield ev.AgentEnded(reason)
+        except Exception as unexpected:
+            yield ev.ErrorEvent(type(unexpected).__name__, str(unexpected))
+            reason = StopReason.FATAL; error = str(unexpected)
+        yield ev.AgentEnded(RunResult(reason, last_assistant_id, error, detail))

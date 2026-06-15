@@ -4,6 +4,7 @@ from runtime.context import RetryPolicy
 from runtime.control import Abort, Approve, ControlPlane, Deny, Pause, Resume, Steer
 from runtime.engine import AgentLoop
 from runtime.executor import ToolRegistry
+from runtime.result import StopReason
 from runtime.state import SessionState
 from tests.helpers import DangerTool, EchoTool, FakeSleep
 
@@ -23,6 +24,9 @@ async def test_abort_mid_stream_discards_partial(tmp_path):
         events.append(event)
         if isinstance(event, ev.TextDeltaEvent): control.submit(Abort())
     assert events[-1].reason == "user_abort" and len(loop.state.messages) == 1
+    # 在产出任何 assistant 消息前中断：final_message_id 为 None。
+    assert events[-1].result.reason is StopReason.USER_ABORT
+    assert events[-1].result.final_message_id is None
 
 
 async def test_steer_appends_user_message(tmp_path):
