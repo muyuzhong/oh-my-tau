@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
 
-from nanoagent.ai import Model, StreamAccumulator, StreamOptions, stream
+from nanoagent.ai import Model, StreamAccumulator, StreamOptions, TextContent, ToolResultMessage, stream
 from nanoagent.ai import StopReason as WireStopReason
 from nanoagent.agent.context import TransformContext, assemble_context
 from nanoagent.agent.control import ControlSource
@@ -142,9 +142,28 @@ async def agent_loop(
 
         for c in tool_calls:
             yield ToolExecutionStart(tool_call_id=c.id, tool_name=c.name, args=c.arguments)
-        tool_results = await execute_tool_calls(
-            tool_calls, tools, signal=signal, before_tool_call=config.before_tool_call
+
+        approved: list = []
+        denied_results: dict[str, ToolResultMessage] = {}
+        for c in tool_calls:
+            ok = True
+            if config.control is not None:
+                ok = await config.control.request_approval(c, "exec")
+            if ok:
+                approved.append(c)
+            else:
+                denied_results[c.id] = ToolResultMessage(
+                    tool_call_id=c.id,
+                    tool_name=c.name,
+                    content=[TextContent(text="Tool approval denied")],
+                    is_error=True,
+                )
+
+        executed = await execute_tool_calls(
+            approved, tools, signal=signal, before_tool_call=config.before_tool_call
         )
+        executed_by_id = {r.tool_call_id: r for r in executed}
+        tool_results = [denied_results.get(c.id) or executed_by_id[c.id] for c in tool_calls]
         for c, r in zip(tool_calls, tool_results):
             yield ToolExecutionEnd(
                 tool_call_id=c.id, tool_name=c.name, result=r, is_error=r.is_error
