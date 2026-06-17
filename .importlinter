@@ -1,0 +1,10 @@
+[importlinter]
+root_package = nanoagent
+
+[importlinter:contract:layers]
+name = nanoagent layered architecture
+type = layers
+layers =
+    nanoagent.agent
+    nanoagent.ai
+    nanoagent.utils
