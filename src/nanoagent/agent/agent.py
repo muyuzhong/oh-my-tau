@@ -1,15 +1,33 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, Union
 
 from nanoagent.ai import Model, UserMessage
 from nanoagent.agent.control import AbortSignal, ControlSource
-from nanoagent.agent.events import AgentEnd, AgentEvent
+from nanoagent.agent.events import (
+    AgentEnd,
+    AgentEvent,
+    MessageEnd,
+    MessageUpdate,
+    ToolExecutionEnd,
+    ToolExecutionStart,
+)
 from nanoagent.agent.loop import AgentLoopConfig, agent_loop
 from nanoagent.agent.messages import AgentMessage, ConvertToLlm, default_convert_to_llm
 from nanoagent.agent.result import RunResult, StopReason
 from nanoagent.agent.tools import AgentTool
+
+
+@dataclass
+class PendingToolCall:
+    """A tool call the loop has started but not yet finished executing."""
+
+    tool_call_id: str
+    tool_name: str
+    args: dict[str, Any]
 
 
 @dataclass
@@ -19,10 +37,15 @@ class AgentState:
     tools: list[AgentTool] = field(default_factory=list)
     messages: list[AgentMessage] = field(default_factory=list)
     is_streaming: bool = False
+    streaming_message: AgentMessage | None = None
+    pending_tool_calls: dict[str, PendingToolCall] = field(default_factory=dict)
 
 
 class AgentBusyError(RuntimeError):
     pass
+
+
+Listener = Callable[[AgentEvent], Union[None, Awaitable[None]]]
 
 
 class Agent:
@@ -46,17 +69,40 @@ class Agent:
         self._max_turns = max_turns
         self._control = control
         self._stream_fn = stream_fn
-        self._listeners: set[Callable[[AgentEvent], None]] = set()
+        self._listeners: set[Listener] = set()
         self._signal: AbortSignal | None = None
         self._steering: list[AgentMessage] = []
+        self._idle = asyncio.Event()
+        self._idle.set()  # no run in flight yet
 
-    def subscribe(self, fn: Callable[[AgentEvent], None]) -> Callable[[], None]:
+    def subscribe(self, fn: Listener) -> Callable[[], None]:
+        """Register an event listener. Listeners may be sync or return an awaitable."""
         self._listeners.add(fn)
         return lambda: self._listeners.discard(fn)
 
-    def _emit(self, event: AgentEvent) -> None:
+    async def _emit(self, event: AgentEvent) -> None:
+        # Await async listeners inline so prompt() (and wait_for_idle) does not
+        # return until every listener — especially the agent_end listener — has settled.
         for fn in list(self._listeners):
-            fn(event)
+            result = fn(event)
+            if inspect.isawaitable(result):
+                await result
+
+    def _reduce(self, event: AgentEvent) -> None:
+        """Fold a single event into state so listeners observe up-to-date state."""
+        if isinstance(event, MessageEnd):
+            self.state.messages.append(event.message)
+            self.state.streaming_message = None
+        elif isinstance(event, MessageUpdate):
+            self.state.streaming_message = event.message
+        elif isinstance(event, ToolExecutionStart):
+            self.state.pending_tool_calls[event.tool_call_id] = PendingToolCall(
+                tool_call_id=event.tool_call_id,
+                tool_name=event.tool_name,
+                args=event.args,
+            )
+        elif isinstance(event, ToolExecutionEnd):
+            self.state.pending_tool_calls.pop(event.tool_call_id, None)
 
     def set_model(self, m: Model) -> None:
         self.state.model = m
@@ -78,6 +124,10 @@ class Agent:
         out, self._steering = self._steering, []
         return out
 
+    async def wait_for_idle(self) -> None:
+        """Block until any in-flight run (and its listeners) has fully settled."""
+        await self._idle.wait()
+
     async def prompt(self, input: str | AgentMessage | list[AgentMessage]) -> RunResult:
         if self.state.is_streaming:
             raise AgentBusyError("agent is already processing")
@@ -98,6 +148,7 @@ class Agent:
         )
         self._signal = AbortSignal()
         self.state.is_streaming = True
+        self._idle.clear()
         result = RunResult(reason=StopReason.ERROR)
         try:
             async for event in agent_loop(
@@ -108,11 +159,14 @@ class Agent:
                 config=cfg,
                 signal=self._signal,
             ):
-                self._emit(event)
+                # Reduce before emitting so listeners see current state.
+                self._reduce(event)
+                await self._emit(event)
                 if isinstance(event, AgentEnd):
-                    self.state.messages.extend(event.messages)
                     result = event.result
         finally:
             self.state.is_streaming = False
+            self.state.streaming_message = None
             self._signal = None
+            self._idle.set()
         return result

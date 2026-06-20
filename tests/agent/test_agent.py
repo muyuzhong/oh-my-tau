@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from pydantic import BaseModel
 
@@ -80,3 +82,99 @@ async def test_steer_injects_queued_message_into_next_turn():
         getattr(m, "role", None) == "user" and getattr(m, "content", None) == "STEER-ME"
         for m in agent.state.messages
     )
+
+
+@pytest.mark.asyncio
+async def test_async_subscriber_is_awaited():
+    clear_providers()
+    register_mock()
+    mock = create_mock_model(responses=[{"content": ["hi"]}])
+    agent = Agent(model=mock)
+    seen: list[str] = []
+
+    async def listener(e):
+        await asyncio.sleep(0)
+        seen.append(e.type)
+
+    agent.subscribe(listener)
+    await agent.prompt("hello")
+    # If the awaitable weren't awaited, the agent_end coroutine would never run.
+    assert "agent_end" in seen
+
+
+@pytest.mark.asyncio
+async def test_state_updated_on_message_end():
+    clear_providers()
+    register_mock()
+    mock = create_mock_model(responses=[{"content": ["hi"]}])
+    agent = Agent(model=mock)
+    observed: list[bool] = []
+
+    def listener(e):
+        if e.type == "message_end":
+            observed.append(e.message in agent.state.messages)
+
+    agent.subscribe(listener)
+    await agent.prompt("hello")
+    # Each message must already be in state by the time its message_end is emitted.
+    assert observed and all(observed)
+
+
+@pytest.mark.asyncio
+async def test_streaming_message_set_during_update_and_cleared_after():
+    clear_providers()
+    register_mock()
+    mock = create_mock_model(responses=[{"content": ["hi"]}])
+    agent = Agent(model=mock)
+    saw_streaming: list[bool] = []
+
+    def listener(e):
+        if e.type == "message_update":
+            saw_streaming.append(agent.state.streaming_message is not None)
+
+    agent.subscribe(listener)
+    await agent.prompt("hello")
+    assert any(saw_streaming)
+    assert agent.state.streaming_message is None
+
+
+@pytest.mark.asyncio
+async def test_pending_tool_calls_tracked_during_execution():
+    clear_providers()
+    register_mock()
+    mock = create_mock_model(
+        responses=[
+            {"content": [{"type": "toolCall", "name": "noop", "arguments": {}}]},
+            {"content": ["done"]},
+        ]
+    )
+    agent = Agent(model=mock, tools=[_NoopTool()])
+    snap: dict = {}
+
+    def listener(e):
+        if e.type == "tool_execution_start":
+            snap["start"] = e.tool_call_id in agent.state.pending_tool_calls
+        elif e.type == "tool_execution_end":
+            snap["end"] = e.tool_call_id in agent.state.pending_tool_calls
+
+    agent.subscribe(listener)
+    await agent.prompt("go")
+    assert snap.get("start") is True
+    assert snap.get("end") is False
+    assert agent.state.pending_tool_calls == {}
+
+
+@pytest.mark.asyncio
+async def test_wait_for_idle_waits_for_active_run():
+    clear_providers()
+    register_mock()
+    mock = create_mock_model(responses=[{"content": ["hi"]}])
+    agent = Agent(model=mock)
+
+    task = asyncio.create_task(agent.prompt("hello"))
+    await asyncio.sleep(0)  # let prompt() begin and mark itself busy
+    await agent.wait_for_idle()
+
+    assert task.done()
+    assert agent.state.is_streaming is False
+    await task
