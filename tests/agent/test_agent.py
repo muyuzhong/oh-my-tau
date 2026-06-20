@@ -178,3 +178,38 @@ async def test_wait_for_idle_waits_for_active_run():
     assert task.done()
     assert agent.state.is_streaming is False
     await task
+
+
+@pytest.mark.asyncio
+async def test_streaming_message_visible_from_assistant_message_start():
+    clear_providers()
+    register_mock()
+    mock = create_mock_model(responses=[{"content": ["hi"]}])
+    agent = Agent(model=mock)
+    seen: list[bool] = []
+
+    def listener(e):
+        if e.type == "message_start" and getattr(e.message, "role", None) == "assistant":
+            # streaming_message must already be the assistant message at its start,
+            # not only once the first message_update arrives.
+            seen.append(agent.state.streaming_message is e.message)
+
+    agent.subscribe(listener)
+    await agent.prompt("hello")
+    assert seen == [True]
+
+
+@pytest.mark.asyncio
+async def test_error_message_set_on_error_run_and_reset_next_run():
+    clear_providers()
+    register_mock()
+    mock = create_mock_model(responses=[{"error": "boom"}, {"content": ["ok"]}])
+    agent = Agent(model=mock)
+
+    r1 = await agent.prompt("go")
+    assert r1.reason is StopReason.ERROR
+    assert agent.state.error_message == "boom"
+
+    r2 = await agent.prompt("again")
+    assert r2.reason is StopReason.COMPLETED
+    assert agent.state.error_message is None

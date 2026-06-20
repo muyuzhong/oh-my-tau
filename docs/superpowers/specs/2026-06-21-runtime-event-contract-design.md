@@ -94,12 +94,13 @@ agent_end(messages, result)               # 恰好一次，终止
 ## 5. 改动点（最小）
 
 1. **`src/nanoagent/agent/events.py`**：加模块级 docstring，写入 §3 规范顺序 + G1–G7 + §4 状态窗口。仅文档，无类型改动（`ToolExecutionUpdate` 已存在）。
-2. **`src/nanoagent/agent/agent.py`**：
+2. **`src/nanoagent/ai/accumulator.py`**（实现期发现，见 D5）：`done`/`error` 时**保留流式消息 id**——`event.message.id = self._msg.id` 后再 `self._msg = event.message`。否则 assistant 的 `message_start`（seed id）与 `message_end`（provider 终态 id）id 不一致，G2 无法成立。
+3. **`src/nanoagent/agent/agent.py`**：
    - `AgentState` 加 `error_message: str | None = None`。
    - `_reduce`：`MessageStart` 且 `role=="assistant"` → 置 `streaming_message`；新增 `AgentEnd` 分支 → `error_message = event.result.error`。（`MessageEnd`/`MessageUpdate`/`ToolExecution*` 不变。）
    - `prompt()` 起始：`self.state.error_message = None`。
-3. **测试**：
-   - `tests/agent/test_event_contract.py`：多工具 run 断言 G1–G7（按 id 关联，不断言 end 全局序）。
+4. **测试**：
+   - `tests/agent/test_event_contract.py`：assistant 消息 id 跨 start→end 稳定；多工具 run 断言 G1–G7（按 id 关联，不断言 end 全局序）。
    - `tests/agent/test_agent.py` 增：assistant `message_start` 时 `streaming_message` 已置位；ERROR run 后 `error_message` 有值且下一次成功 run 前被重置。
 
 ---
@@ -117,6 +118,7 @@ agent_end(messages, result)               # 恰好一次，终止
 - **D2 `error_message` 取自 `AgentEnd.result.error`**（而非逐 turn）：NanoAgent run 在首个 error 即终止，run 级与 turn 级等价；更少代码。abort 无错误文本时保持 None。
 - **D3 `streaming_message` 在 assistant `message_start` 即置位**：靠 `role=="assistant"` 区分（prompt/tool-result/steering 的 start 不置位）。
 - **D4 契约测试只断言「每 id start<end」**：不锁 end 全局序，保证 spec ③ 改完成序时不破契约。
+- **D5 流式消息 id 稳定（实现期发现）**：accumulator 在 `done`/`error` 时原本 `self._msg = event.message`，丢弃 seed id，导致 assistant 的 `message_start`/`message_end` id 不一致（G2 不成立）。修法是采纳终态消息但**保留 seed id**（`event.message.id = self._msg.id`）。这是 ai 层改动，但属事件契约根基，故纳入本 spec；与既有测试 `test_accumulate_returns_done_message`（断言 `out is msg`）兼容。
 
 ---
 

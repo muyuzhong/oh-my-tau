@@ -36,6 +36,10 @@ class StreamAccumulator:
         elif t == "toolcall_end":
             self._msg.content[event.content_index] = event.tool_call
         elif t in ("done", "error"):
+            # Adopt the provider's final message, but keep the streaming id so a
+            # consumer sees one stable message identity across message_start ->
+            # message_update -> message_end (see agent event contract G2).
+            event.message.id = self._msg.id
             self._msg = event.message
 
 

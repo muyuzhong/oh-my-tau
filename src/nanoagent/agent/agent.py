@@ -11,6 +11,7 @@ from nanoagent.agent.events import (
     AgentEnd,
     AgentEvent,
     MessageEnd,
+    MessageStart,
     MessageUpdate,
     ToolExecutionEnd,
     ToolExecutionStart,
@@ -39,6 +40,7 @@ class AgentState:
     is_streaming: bool = False
     streaming_message: AgentMessage | None = None
     pending_tool_calls: dict[str, PendingToolCall] = field(default_factory=dict)
+    error_message: str | None = None
 
 
 class AgentBusyError(RuntimeError):
@@ -90,7 +92,12 @@ class Agent:
 
     def _reduce(self, event: AgentEvent) -> None:
         """Fold a single event into state so listeners observe up-to-date state."""
-        if isinstance(event, MessageEnd):
+        if isinstance(event, MessageStart):
+            # The assistant message is observable as the streaming message from its
+            # start, not only once the first delta (message_update) arrives.
+            if getattr(event.message, "role", None) == "assistant":
+                self.state.streaming_message = event.message
+        elif isinstance(event, MessageEnd):
             self.state.messages.append(event.message)
             self.state.streaming_message = None
         elif isinstance(event, MessageUpdate):
@@ -103,6 +110,8 @@ class Agent:
             )
         elif isinstance(event, ToolExecutionEnd):
             self.state.pending_tool_calls.pop(event.tool_call_id, None)
+        elif isinstance(event, AgentEnd):
+            self.state.error_message = event.result.error
 
     def set_model(self, m: Model) -> None:
         self.state.model = m
@@ -148,6 +157,7 @@ class Agent:
         )
         self._signal = AbortSignal()
         self.state.is_streaming = True
+        self.state.error_message = None
         self._idle.clear()
         result = RunResult(reason=StopReason.ERROR)
         try:
