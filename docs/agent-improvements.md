@@ -99,3 +99,14 @@
 - 验证：`pytest tests/ai/test_openai.py -q`，5 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest -q`，67 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
+
+## 2026-06-23 - mock provider usage 注入
+
+- 模块：`nanoagent.ai.providers.mock`
+- 改动：脚本化 mock response 现在可通过 `usage` 字段设置最终 `AssistantMessage.usage`，便于框架测试覆盖 usage 传播。
+- 约束：只增强 mock provider；不改真实 provider、token 预算策略、默认 provider 或 API key 行为。
+- 测试：先新增 `test_mock_response_can_set_usage` 并确认 usage 仍为默认 0 导致失败，再做最小实现。
+- 验证：`pytest tests/ai/test_mock.py::test_mock_response_can_set_usage -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/ai/test_mock.py -q`，3 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest -q`，68 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。

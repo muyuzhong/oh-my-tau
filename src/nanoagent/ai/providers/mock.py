@@ -14,7 +14,7 @@ from nanoagent.ai.events import (
     ToolCallEnd,
     ToolCallStart,
 )
-from nanoagent.ai.messages import AssistantMessage, Context, TextContent, ToolCall
+from nanoagent.ai.messages import AssistantMessage, Context, TextContent, ToolCall, Usage
 from nanoagent.ai.model import Model
 from nanoagent.ai.options import StreamOptions
 from nanoagent.ai.provider import register_provider
@@ -76,6 +76,15 @@ class MockModel(Model):
         has_tool = any(getattr(c, "type", None) == "toolCall" for c in msg.content)
         reason = resp.get("stop_reason") or (StopReason.TOOL_USE if has_tool else StopReason.STOP)
         msg.stop_reason = reason
+        usage = resp.get("usage")
+        if isinstance(usage, Usage):
+            msg.usage = usage
+        elif isinstance(usage, dict):
+            msg.usage = Usage(
+                input=usage.get("input", 0),
+                output=usage.get("output", 0),
+                total_tokens=usage.get("total_tokens", 0),
+            )
         if resp.get("error"):
             msg.stop_reason = StopReason.ERROR
             msg.error_message = resp["error"]

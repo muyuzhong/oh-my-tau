@@ -25,3 +25,21 @@ async def test_mock_tool_call_sets_tool_use():
     done = events[-1]
     assert done.message.stop_reason is StopReason.TOOL_USE
     assert done.message.content[0].name == "echo"
+
+
+@pytest.mark.asyncio
+async def test_mock_response_can_set_usage():
+    mock = create_mock_model(
+        responses=[
+            {
+                "content": ["ok"],
+                "usage": {"input": 2, "output": 3, "total_tokens": 5},
+            }
+        ]
+    )
+
+    events = [e async for e in mock.stream(mock, Context(), None)]
+
+    assert events[-1].message.usage.input == 2
+    assert events[-1].message.usage.output == 3
+    assert events[-1].message.usage.total_tokens == 5
