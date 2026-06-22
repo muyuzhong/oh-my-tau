@@ -77,3 +77,14 @@
 - 验证：`pytest tests/ai/test_accumulator.py -q`，4 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest -q`，65 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
+
+## 2026-06-23 - agent 默认消息转换按类型过滤
+
+- 模块：`nanoagent.agent`
+- 改动：`default_convert_to_llm` 现在按 `UserMessage`、`AssistantMessage`、`ToolResultMessage` 实际类型保留 wire 消息，而不是只看 `role` 字符串。
+- 约束：自定义消息仍默认丢弃；具体降级或映射策略仍由 harness 通过 `convert_to_llm` 注入。
+- 测试：先新增 `test_default_convert_filters_custom_even_with_wire_role_string` 并确认误标 `role="user"` 的自定义消息被透传导致失败，再做最小实现。
+- 验证：`pytest tests/agent/test_messages.py::test_default_convert_filters_custom_even_with_wire_role_string -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/agent/test_messages.py -q`，2 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest -q`，66 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。

@@ -20,3 +20,17 @@ def test_default_convert_filters_custom():
     ]
     wire = default_convert_to_llm(msgs)
     assert [m.role for m in wire] == ["user", "assistant"]
+
+
+@dataclass
+class MislabelledCustom(CustomMessage):
+    text: str = ""
+    role: str = "user"
+
+
+def test_default_convert_filters_custom_even_with_wire_role_string():
+    msgs = [MislabelledCustom(text="not a wire user")]
+
+    wire = default_convert_to_llm(msgs)
+
+    assert wire == []

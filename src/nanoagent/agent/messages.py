@@ -6,7 +6,7 @@ from typing import Callable, Union
 from nanoagent.ai import AssistantMessage, Message, ToolResultMessage, UserMessage
 from nanoagent.utils import new_id
 
-_WIRE_ROLES = ("user", "assistant", "toolResult")
+_WIRE_MESSAGE_TYPES = (UserMessage, AssistantMessage, ToolResultMessage)
 
 
 @dataclass
@@ -30,7 +30,7 @@ def default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
 
     Specific downgrade behavior is a harness policy supplied via convert_to_llm.
     """
-    return [m for m in messages if getattr(m, "role", None) in _WIRE_ROLES]  # type: ignore[return-value]
+    return [m for m in messages if isinstance(m, _WIRE_MESSAGE_TYPES)]
 
 
 __all__ = ["AgentMessage", "ConvertToLlm", "CustomMessage", "default_convert_to_llm"]
