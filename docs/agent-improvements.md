@@ -55,3 +55,14 @@
 - 验证：`pytest tests/agent/test_context.py -q`，3 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest -q`，63 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
+
+## 2026-06-23 - agent tool wire schema 缓存防污染
+
+- 模块：`nanoagent.agent`
+- 改动：`AgentTool.to_wire()` 仍缓存内部 wire 模板，但每次对外返回带深拷贝参数 schema 的 `Tool`，避免 provider adapter 或调用方修改返回值后污染后续上下文。
+- 约束：不改变工具执行、参数校验、并发策略或 approval/hook 行为。
+- 测试：先新增 `test_to_wire_schema_cache_is_not_externally_mutable` 并确认第二次读取 schema 缺失导致失败，再做最小实现。
+- 验证：`pytest tests/agent/test_tools.py::test_to_wire_schema_cache_is_not_externally_mutable -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/agent/test_tools.py -q`，5 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest -q`，64 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。

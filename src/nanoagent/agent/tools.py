@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Literal
@@ -27,14 +28,19 @@ class AgentTool(ABC):
 
     def to_wire(self) -> Tool:
         # Tool definition is static; model_json_schema() isn't free, so build
-        # the wire shape once and reuse it across turns/runs.
+        # the wire shape once and reuse it across turns/runs. Return a copy so
+        # downstream provider adapters cannot mutate the cached schema.
         if self._wire is None:
             self._wire = Tool(
                 name=self.name,
                 description=self.description,
                 parameters=self.parameters.model_json_schema(),
             )
-        return self._wire
+        return Tool(
+            name=self._wire.name,
+            description=self._wire.description,
+            parameters=copy.deepcopy(self._wire.parameters),
+        )
 
     @abstractmethod
     async def execute(

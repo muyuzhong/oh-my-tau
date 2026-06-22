@@ -45,3 +45,13 @@ async def test_validation_error_is_error_not_raise():
 def test_to_wire_emits_json_schema():
     wire = EchoTool().to_wire()
     assert wire.name == "echo" and wire.parameters["properties"]["text"]["type"] == "string"
+
+
+def test_to_wire_schema_cache_is_not_externally_mutable():
+    tool = EchoTool()
+    wire = tool.to_wire()
+    wire.parameters["properties"].clear()
+
+    next_wire = tool.to_wire()
+
+    assert next_wire.parameters["properties"]["text"]["type"] == "string"
