@@ -41,3 +41,16 @@ async def test_accumulate_folds_text_when_no_done_message():
     ]:
         acc.add(e)
     assert acc.message.content[0].text == "hello"
+
+
+def test_stream_accumulator_exposes_text_delta_before_text_end():
+    from nanoagent.ai.accumulator import StreamAccumulator
+
+    acc = StreamAccumulator(model_id="m", provider="mock", api="mock")
+
+    acc.add(StreamStart())
+    acc.add(TextStart(content_index=0))
+    acc.add(TextDelta(content_index=0, delta="he"))
+    acc.add(TextDelta(content_index=0, delta="llo"))
+
+    assert acc.message.content[0].text == "hello"

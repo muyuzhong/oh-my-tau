@@ -25,6 +25,10 @@ class StreamAccumulator:
         t = event.type
         if t == "text_start":
             self._msg.content.append(TextContent(text=""))
+        elif t == "text_delta":
+            block = self._msg.content[event.content_index]
+            if isinstance(block, TextContent):
+                block.text += event.delta
         elif t == "text_end":
             self._msg.content[event.content_index] = TextContent(text=event.text)
         elif t == "thinking_start":

@@ -11,3 +11,14 @@
 - 验证：`pytest tests/agent/test_agent.py tests/agent/test_loop_hooks.py -q`，18 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest -q`，58 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
+
+## 2026-06-23 - ai 流式文本增量可见
+
+- 模块：`nanoagent.ai`
+- 改动：`StreamAccumulator` 现在会在收到 `TextDelta` 时追加到当前 `TextContent`，让中间累计消息在 `TextEnd` 前也能反映已到达文本。
+- 约束：`TextEnd` 仍保留最终文本覆盖逻辑，避免改变 provider 最终消息的权威性。
+- 测试：先新增 `test_stream_accumulator_exposes_text_delta_before_text_end` 并确认失败，再做最小实现。
+- 验证：`pytest tests/ai/test_accumulator.py::test_stream_accumulator_exposes_text_delta_before_text_end -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/ai/test_accumulator.py -q`，3 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest -q`，59 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
