@@ -13,6 +13,7 @@ from nanoagent.ai.events import (
     TextDelta,
     TextEnd,
     TextStart,
+    ToolCallDelta,
     ToolCallEnd,
     ToolCallStart,
 )
@@ -135,7 +136,15 @@ class OpenAIProvider:
                             yield TextDelta(content_index=0, delta=delta["content"])
                         for tc in delta.get("tool_calls", []):
                             idx = tc["index"]
-                            slot = tool_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+                            if idx not in tool_acc:
+                                tool_acc[idx] = {
+                                    "id": "",
+                                    "name": "",
+                                    "args": "",
+                                    "content_index": (1 if text_parts else 0) + idx,
+                                }
+                                yield ToolCallStart(content_index=tool_acc[idx]["content_index"])
+                            slot = tool_acc[idx]
                             if tc.get("id"):
                                 slot["id"] = tc["id"]
                             fn = tc.get("function", {})
@@ -143,6 +152,10 @@ class OpenAIProvider:
                                 slot["name"] = fn["name"]
                             if fn.get("arguments"):
                                 slot["args"] += fn["arguments"]
+                                yield ToolCallDelta(
+                                    content_index=slot["content_index"],
+                                    delta=fn["arguments"],
+                                )
                         if chunk["choices"][0].get("finish_reason"):
                             finish = chunk["choices"][0]["finish_reason"]
         except ProviderError as e:
@@ -155,21 +168,18 @@ class OpenAIProvider:
             msg.error_message = str(e)
             yield StreamError(message=msg)
             return
-        idx = 0
         if text_parts:
             full = "".join(text_parts)
             msg.content.append(TextContent(text=full))
             yield TextEnd(content_index=0, text=full)
-            idx = 1
-        for i, slot in tool_acc.items():
+        for _, slot in sorted(tool_acc.items()):
             try:
                 args = json.loads(slot["args"]) if slot["args"] else {}
             except json.JSONDecodeError:
                 args = {}
             tc = ToolCall(id=slot["id"], name=slot["name"], arguments=args)
             msg.content.append(tc)
-            yield ToolCallStart(content_index=idx + i)
-            yield ToolCallEnd(content_index=idx + i, tool_call=tc)
+            yield ToolCallEnd(content_index=slot["content_index"], tool_call=tc)
         msg.stop_reason = _FINISH_MAP.get(finish, StopReason.STOP)
         yield StreamDone(message=msg)
 

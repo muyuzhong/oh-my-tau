@@ -88,3 +88,14 @@
 - 验证：`pytest tests/agent/test_messages.py -q`，2 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest -q`，66 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
+
+## 2026-06-23 - openai 工具调用参数增量事件
+
+- 模块：`nanoagent.ai.providers.openai`
+- 改动：OpenAI SSE 解析工具调用参数分片时，现在会在 `ToolCallStart` 和 `ToolCallEnd` 之间发出 `ToolCallDelta`，让调用方能观察参数流式累积过程。
+- 约束：不改变请求编码、默认 provider、API key、approval 或 harness 策略；最终 `ToolCallEnd` 仍携带解析后的完整参数。
+- 测试：先新增 `test_stream_emits_tool_call_argument_deltas` 并确认缺少 delta 导致失败，再做最小实现。
+- 验证：`pytest tests/ai/test_openai.py::test_stream_emits_tool_call_argument_deltas -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/ai/test_openai.py -q`，5 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest -q`，67 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。

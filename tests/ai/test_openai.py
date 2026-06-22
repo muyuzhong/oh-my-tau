@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -82,3 +84,50 @@ async def test_stream_parses_text_and_tool_calls(monkeypatch):
     assert events[-1].type == "done"
     assert events[-1].message.content[0].text == "hello"
     assert events[-1].message.stop_reason is StopReason.STOP
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_tool_call_argument_deltas(monkeypatch):
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "id": "tc1", "function": {"name": "echo", "arguments": '{"x"'}}
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {"delta": {"tool_calls": [{"index": 0, "function": {"arguments": ": 1}"}}]}}
+            ]
+        },
+        {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+    ]
+    sse = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
+    sse += "data: [DONE]\n\n"
+
+    def handler(request):
+        return httpx.Response(200, text=sse)
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda *a, **k: real_client(transport=httpx.MockTransport(handler)),
+    )
+    prov = OpenAIProvider()
+    model = Model(id="gpt-x", api="openai-completions", provider="openai")
+    events = [e async for e in prov.stream(model, Context(messages=[]), None)]
+
+    assert [e.type for e in events if e.type.startswith("toolcall_")] == [
+        "toolcall_start",
+        "toolcall_delta",
+        "toolcall_delta",
+        "toolcall_end",
+    ]
+    assert events[-1].message.content[0].arguments == {"x": 1}
+    assert events[-1].message.stop_reason is StopReason.TOOL_USE
