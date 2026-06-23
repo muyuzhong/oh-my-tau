@@ -264,3 +264,15 @@
 - 验证：`pytest tests/utils -q`，5 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest -q`，81 passed，1 个 pytest cache 写入警告。
+
+## 2026-06-23 - ai stream 事件判别字段固定
+
+- 模块：`nanoagent.ai`
+- 改动：stream 事件 dataclass 的 `type` 判别字段现在不再作为构造参数暴露，避免调用方误传错误类型破坏事件分发。
+- 约束：保留事件实例上的 `type` 字段和值，不改变 provider、accumulator 或 agent loop 的事件流语义。
+- 测试：先新增 `test_event_type_discriminator_is_not_constructor_input` 并确认当前实现未抛错导致失败，再用 `field(init=False)` 做最小实现。
+- 验证：`pytest tests/ai/test_events.py::test_event_type_discriminator_is_not_constructor_input -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/ai/test_events.py -q`，2 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/ai -q`，32 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest -q`，82 passed，1 个 pytest cache 写入警告。
