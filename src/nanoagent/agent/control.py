@@ -23,8 +23,9 @@ class AbortSignal:
         self.reason = reason
         self._event.set()
 
-    async def wait(self) -> None:
+    async def wait(self) -> Any:
         await self._event.wait()
+        return self.reason
 
 
 class ControlSource(Protocol):

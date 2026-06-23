@@ -276,3 +276,15 @@
 - 验证：`pytest tests/ai -q`，32 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest -q`，82 passed，1 个 pytest cache 写入警告。
+
+## 2026-06-23 - agent abort 等待原因返回
+
+- 模块：`nanoagent.agent`
+- 改动：`AbortSignal.wait()` 现在在取消触发后返回保存的首个 `reason`，等待方可以直接拿到取消原因。
+- 约束：不改变 `.aborted`、`abort()` 幂等语义或 provider-facing signal 行为；忽略 `wait()` 返回值的现有调用保持兼容。
+- 测试：先新增 `test_abort_signal_wait_returns_reason` 并确认当前实现返回 `None` 导致失败，再做最小实现。
+- 验证：`pytest tests/agent/test_control.py::test_abort_signal_wait_returns_reason -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/agent/test_control.py -q`，4 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/agent -q`，45 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest -q`，83 passed，1 个 pytest cache 写入警告。

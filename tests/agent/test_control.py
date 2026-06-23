@@ -19,6 +19,14 @@ def test_abort_signal_keeps_first_reason():
 
 
 @pytest.mark.asyncio
+async def test_abort_signal_wait_returns_reason():
+    sig = AbortSignal()
+    sig.abort("user")
+
+    assert await sig.wait() == "user"
+
+
+@pytest.mark.asyncio
 async def test_allow_all_approves():
     src = AllowAll()
     assert await src.request_approval(ToolCall(id="t", name="x", arguments={}), "exec") is True
