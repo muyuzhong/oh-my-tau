@@ -22,3 +22,7 @@ class RunResult:
     final_message_id: str | None = None
     error: str | None = None
     detail: dict | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.reason is StopReason.COMPLETED

@@ -229,3 +229,15 @@
 - 验证：`pytest tests/ai -q`，30 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest -q`，78 passed，1 个 pytest cache 写入警告。
+
+## 2026-06-23 - agent RunResult 成功判定
+
+- 模块：`nanoagent.agent`
+- 改动：`RunResult` 增加只读 `succeeded` 属性，调用方可直接判断整次 run 是否以 `StopReason.COMPLETED` 结束。
+- 约束：不改变任何终止原因、错误传播或 agent loop 行为；只是结果结构的便利用法。
+- 测试：先新增 `test_run_result_succeeded_only_for_completed` 并确认属性缺失导致失败，再做最小实现。
+- 验证：`pytest tests/agent/test_result.py::test_run_result_succeeded_only_for_completed -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/agent/test_result.py -q`，4 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/agent -q`，44 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest -q`，79 passed，1 个 pytest cache 写入警告。

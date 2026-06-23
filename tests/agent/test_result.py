@@ -7,6 +7,11 @@ def test_run_result_fields():
     assert r.reason is StopReason.COMPLETED and r.error is None
 
 
+def test_run_result_succeeded_only_for_completed():
+    assert RunResult(reason=StopReason.COMPLETED).succeeded is True
+    assert RunResult(reason=StopReason.ERROR).succeeded is False
+
+
 def test_agent_end_carries_result():
     r = RunResult(reason=StopReason.MAX_TURNS)
     ev = AgentEnd(messages=[], result=r)
