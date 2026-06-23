@@ -121,3 +121,15 @@
 - 验证：`pytest tests/utils/test_ids.py -q`，2 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest -q`，69 passed，1 个 pytest cache 写入警告。
+
+## 2026-06-23 - agent abort 原因稳定化
+
+- 模块：`nanoagent.agent`
+- 改动：`AbortSignal.abort()` 在信号已经触发后保持第一次取消原因，后续重复调用不会覆盖根因。
+- 约束：不改变 `.aborted`、`.wait()` 或 provider-facing signal duck type；不引入取消策略或 harness 行为。
+- 测试：先新增 `test_abort_signal_keeps_first_reason` 并确认第二次 abort 覆盖 reason 导致失败，再做最小实现。
+- 验证：`pytest tests/agent/test_control.py::test_abort_signal_keeps_first_reason -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/agent/test_control.py -q`，3 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/agent -q`，41 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest -q`，70 passed，1 个 pytest cache 写入警告。

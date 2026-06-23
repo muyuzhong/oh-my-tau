@@ -11,6 +11,13 @@ def test_abort_signal_flips():
     assert sig.aborted is True and sig.reason == "user"
 
 
+def test_abort_signal_keeps_first_reason():
+    sig = AbortSignal()
+    sig.abort("first")
+    sig.abort("second")
+    assert sig.reason == "first"
+
+
 @pytest.mark.asyncio
 async def test_allow_all_approves():
     src = AllowAll()

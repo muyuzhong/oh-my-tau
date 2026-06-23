@@ -18,6 +18,8 @@ class AbortSignal:
         return self._event.is_set()
 
     def abort(self, reason: Any = None) -> None:
+        if self.aborted:
+            return
         self.reason = reason
         self._event.set()
 
