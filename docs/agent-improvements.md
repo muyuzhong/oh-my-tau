@@ -205,3 +205,15 @@
 - 验证：`pytest tests/ai -q`，28 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
 - 验证：`pytest -q`，76 passed，1 个 pytest cache 写入警告。
+
+## 2026-06-23 - ai Usage 总量推导
+
+- 模块：`nanoagent.ai`
+- 改动：`Usage` 在只提供 `input` 和 `output` 时自动推导 `total_tokens`，避免可推导的总 token 数保持为 0。
+- 约束：显式非零 `total_tokens` 仍保持 provider 给出的值；不引入 token 预算、计费或 harness 策略。
+- 测试：先新增 `test_usage_derives_total_tokens_when_missing` 并确认 `total_tokens` 仍为 0 导致失败，再做最小实现；同时补充显式 total 的保持断言。
+- 验证：`pytest tests/ai/test_messages.py::test_usage_derives_total_tokens_when_missing -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/ai/test_messages.py -q`，6 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/ai -q`，29 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest tests/test_import_contract.py -q`，1 passed，1 个 pytest cache 写入警告。
+- 验证：`pytest -q`，77 passed，1 个 pytest cache 写入警告。

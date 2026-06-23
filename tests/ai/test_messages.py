@@ -16,6 +16,12 @@ def test_user_message_defaults():
     assert m.id  # auto-generated
 
 
+def test_usage_derives_total_tokens_when_missing():
+    usage = Usage(input=2, output=3)
+
+    assert usage.total_tokens == 5
+
+
 def test_assistant_message_carries_wire_fields():
     m = AssistantMessage(
         content=[TextContent(text="ok"), ToolCall(id="t1", name="echo", arguments={"x": 1})],
@@ -28,6 +34,7 @@ def test_assistant_message_carries_wire_fields():
     assert m.role == "assistant"
     assert m.content[1].type == "toolCall"
     assert m.stop_reason is StopReason.TOOL_USE
+    assert m.usage.total_tokens == 3
 
 
 def test_tool_result_message():

@@ -45,6 +45,10 @@ class Usage:
     output: int = 0
     total_tokens: int = 0
 
+    def __post_init__(self) -> None:
+        if self.total_tokens == 0 and (self.input or self.output):
+            self.total_tokens = self.input + self.output
+
 
 # ---- messages ----
 @dataclass
