@@ -7,3 +7,5 @@ build/
 dist/
 *.egg-info/
 .lion-code/
+/benchmarks/context_management/README_CN.md
+/benchmarks/context_management/REPORT_CN.md

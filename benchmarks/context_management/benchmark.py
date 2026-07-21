@@ -11,10 +11,12 @@ import copy
 import hashlib
 import json
 import os
+import re
 import statistics
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -123,6 +125,8 @@ class ReplayResult:
             ),
             "cache_hit_rate": ratio(all_usage["cache_hit_tokens"], all_usage["prompt_tokens"]),
             "retention_score": self.retention.get("score", 0.0),
+            "retention_normalized_score": self.retention.get("normalized_score", 0.0),
+            "retention_value_score": self.retention.get("value_score", 0.0),
         }
 
 
@@ -131,6 +135,7 @@ def parse_args() -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--online", action="store_true", help="运行真实 API 回放")
     mode.add_argument("--offline", action="store_true", help="只运行本地分层探针（默认）")
+    mode.add_argument("--merge-results", nargs="+", metavar="JSON", help="合并互不重叠的分批结果，不调用 API")
     parser.add_argument("--base-url", default="https://api.deepseek.com")
     parser.add_argument("--model", default="deepseek-v4-flash")
     parser.add_argument("--api-key-env", default="OPENAI_API_KEY")
@@ -437,6 +442,11 @@ def flatten_strings(value: Any) -> list[str]:
     return [str(value)]
 
 
+def normalize_fact(value: str) -> str:
+    """只忽略结构分隔符两侧空白，不吞掉命令或自然语言中的有效空格。"""
+    return re.sub(r"\s*([=:])\s*", r"\1", value.strip())
+
+
 def evaluate_retention(
     client: OpenAI,
     agent: Agent,
@@ -479,11 +489,27 @@ def evaluate_retention(
         parsed = {"_unparsed": content}
     haystack = "\n".join(flatten_strings(parsed))
     matched = {key: value in haystack for key, value in expected.items()}
+    normalized_haystack = normalize_fact(haystack)
+    normalized_matched = {
+        key: normalize_fact(value) in normalized_haystack for key, value in expected.items()
+    }
+    value_matched: dict[str, bool] = {}
+    for key, expected_value in expected.items():
+        candidates = {normalize_fact(expected_value)}
+        if "=" in expected_value:
+            candidates.add(normalize_fact(expected_value.split("=", 1)[1]))
+        actual_value = parsed.get(key) if isinstance(parsed, dict) else parsed
+        actual_haystack = normalize_fact("\n".join(flatten_strings(actual_value)))
+        value_matched[key] = any(candidate == actual_haystack or candidate in actual_haystack for candidate in candidates)
     result.retention = {
         "expected": expected,
         "response": parsed,
         "matched": matched,
         "score": ratio(sum(matched.values()), len(matched)),
+        "normalized_matched": normalized_matched,
+        "normalized_score": ratio(sum(normalized_matched.values()), len(normalized_matched)),
+        "value_matched": value_matched,
+        "value_score": ratio(sum(value_matched.values()), len(value_matched)),
     }
     record_call(
         result,
@@ -505,16 +531,18 @@ def run_replay(
     api_key: str,
     budget: Budget,
     effective_window: int,
+    run_id: str,
 ) -> tuple[ReplayResult, list[dict[str, Any]]]:
     seed, source_meta = source_snapshot(scenario["source_files"])
-    salt = f"[上下文基准；场景={scenario['id']}；变体={variant}]"
+    # run_id 放在首部，确保试跑或上一次完整运行留下的服务端缓存不会污染本轮冷启动。
+    salt = f"[运行={run_id}；场景={scenario['id']}；变体={variant}]"
     agent = Agent(
         model=model,
         api_base=base_url,
         api_key=api_key,
         custom_system_prompt=(
-            "你正在参与 Lion Code 上下文管理的固定回放测试。"
-            "基准计量点只需简短回复，不要主动调用工具。\n" + salt
+            salt + "\n你正在参与 Lion Code 上下文管理的固定回放测试。"
+            "基准计量点只需简短回复，不要主动调用工具。"
         ),
     )
     agent.effective_window = effective_window
@@ -711,6 +739,10 @@ def aggregate_by_variant(results: list[ReplayResult]) -> dict[str, dict[str, Any
         usage = sum_usage(call["usage"] for call in calls)
         normal_usage = sum_usage(call["usage"] for call in normal)
         retention_scores = [r.retention.get("score", 0.0) for r in selected]
+        normalized_retention_scores = [
+            r.retention.get("normalized_score", 0.0) for r in selected
+        ]
+        value_retention_scores = [r.retention.get("value_score", 0.0) for r in selected]
         output[variant] = {
             "scenario_count": len(selected),
             "call_count": len(calls),
@@ -724,6 +756,12 @@ def aggregate_by_variant(results: list[ReplayResult]) -> dict[str, dict[str, Any
             ),
             "cache_hit_rate": ratio(usage["cache_hit_tokens"], usage["prompt_tokens"]),
             "retention_mean": statistics.mean(retention_scores) if retention_scores else 0.0,
+            "retention_normalized_mean": (
+                statistics.mean(normalized_retention_scores) if normalized_retention_scores else 0.0
+            ),
+            "retention_value_mean": (
+                statistics.mean(value_retention_scores) if value_retention_scores else 0.0
+            ),
             "events": {
                 key: sum(result.events.as_dict()[key] for result in selected)
                 for key in EventCounts().as_dict()
@@ -744,7 +782,71 @@ def comparison(raw: dict[str, Any], managed: dict[str, Any]) -> dict[str, float]
         "managed_cache_hit_rate": managed["cache_hit_rate"],
         "raw_retention": raw["retention_mean"],
         "managed_retention": managed["retention_mean"],
+        "raw_retention_normalized": raw["retention_normalized_mean"],
+        "managed_retention_normalized": managed["retention_normalized_mean"],
+        "raw_retention_value": raw["retention_value_mean"],
+        "managed_retention_value": managed["retention_value_mean"],
     }
+
+
+def replay_from_dict(item: dict[str, Any]) -> ReplayResult:
+    result = ReplayResult(
+        scenario_id=item["scenario_id"],
+        scenario_name=item["scenario_name"],
+        variant=item["variant"],
+        calls=item["calls"],
+        events=EventCounts(**item["events"]),
+        retention=item["retention"],
+    )
+    return result
+
+
+def merge_result_files(paths: list[str], dataset: dict[str, Any], probes: list[dict[str, Any]]) -> dict[str, Any]:
+    inputs = [json.loads(Path(path).read_text(encoding="utf-8")) for path in paths]
+    if not inputs:
+        raise ValueError("至少需要一个结果文件")
+    first_meta = inputs[0]["metadata"]
+    scenario_results: list[dict[str, Any]] = []
+    source_snapshots: dict[str, Any] = {}
+    seen: set[tuple[str, str]] = set()
+    for payload in inputs:
+        for item in payload.get("scenario_results", []):
+            key = (item["scenario_id"], item["variant"])
+            if key in seen:
+                raise ValueError(f"合并结果存在重复场景/变体：{key[0]} / {key[1]}")
+            seen.add(key)
+            scenario_results.append(item)
+        source_snapshots.update(payload.get("source_snapshots", {}))
+
+    expected = {
+        (scenario["id"], variant)
+        for scenario in dataset["scenarios"]
+        for variant in (["raw", "managed", "eager_ablation"] if scenario["id"] == "hot_cache_progressive" else ["raw", "managed"])
+    }
+    missing = expected - seen
+    if missing:
+        formatted = ", ".join(f"{scenario}/{variant}" for scenario, variant in sorted(missing))
+        raise ValueError(f"合并后仍缺少结果：{formatted}")
+
+    replays = [replay_from_dict(item) for item in scenario_results]
+    aggregate = aggregate_by_variant(replays)
+    merged = {
+        "metadata": {
+            **first_meta,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "online": True,
+            "run_id": "merged-" + uuid.uuid4().hex[:8],
+            "benchmark_spend_cny": sum(float(p["metadata"].get("benchmark_spend_cny", 0.0)) for p in inputs),
+            "merged_from": [str(Path(path)) for path in paths],
+        },
+        "pricing": dataset["pricing_cny_per_million_tokens"],
+        "offline_probes": probes,
+        "source_snapshots": source_snapshots,
+        "scenario_results": scenario_results,
+        "aggregate": aggregate,
+        "comparison": comparison(aggregate["raw"], aggregate["managed"]),
+    }
+    return merged
 
 
 def pct(value: float) -> str:
@@ -798,7 +900,7 @@ def render_report(payload: dict[str, Any]) -> str:
             "",
             "## 在线汇总",
             "",
-            "| 变体 | 场景 | 全部输入 token | 缓存命中率 | 峰值输入 | 超过有效窗口 | 事实保留率 | 实际费用（元） |",
+            "| 变体 | 场景 | 全部输入 token | 缓存命中率 | 峰值输入 | 超过有效窗口 | 逐字/规范化/事实值保留率 | 实际费用（元） |",
             "|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
@@ -810,7 +912,9 @@ def render_report(payload: dict[str, Any]) -> str:
             f"| `{variant}` | {item['scenario_count']} | "
             f"{item['all_usage']['prompt_tokens']:,} | {pct(item['cache_hit_rate'])} | "
             f"{item['peak_prompt_tokens']:,} | {item['over_effective_window_calls']} | "
-            f"{pct(item['retention_mean'])} | {item['total_cost_cny']:.4f} |"
+            f"{pct(item['retention_mean'])} / {pct(item['retention_normalized_mean'])} / "
+            f"{pct(item['retention_value_mean'])} | "
+            f"{item['total_cost_cny']:.4f} |"
         )
 
     comp = payload["comparison"]
@@ -824,7 +928,9 @@ def render_report(payload: dict[str, Any]) -> str:
             f"- 单次请求峰值输入：减少 **{pct(comp['peak_prompt_reduction'])}**。",
             f"- 按图片费率计算的 API 总费用：减少 **{pct(comp['actual_total_cost_reduction'])}**。",
             f"- 缓存命中率：`raw` {pct(comp['raw_cache_hit_rate'])}，`managed` {pct(comp['managed_cache_hit_rate'])}。",
-            f"- 事实保留率：`raw` {pct(comp['raw_retention'])}，`managed` {pct(comp['managed_retention'])}。",
+            f"- 逐字事实保留率：`raw` {pct(comp['raw_retention'])}，`managed` {pct(comp['managed_retention'])}。",
+            f"- 规范化事实保留率：`raw` {pct(comp['raw_retention_normalized'])}，`managed` {pct(comp['managed_retention_normalized'])}。",
+            f"- 事实值保留率：`raw` {pct(comp['raw_retention_value'])}，`managed` {pct(comp['managed_retention_value'])}。",
             "",
             "## 压缩事件",
             "",
@@ -871,6 +977,17 @@ def main() -> int:
     dataset = read_dataset()
     probes = offline_probes(dataset)
     online = bool(args.online)
+    if args.merge_results:
+        payload = merge_result_files(args.merge_results, dataset, probes)
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        latest = RESULTS_DIR / "latest.json"
+        latest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        history = RESULTS_DIR / f"{payload['metadata']['run_id']}.json"
+        history.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        REPORT_PATH.write_text(render_report(payload), encoding="utf-8")
+        print(f"合并结果：{latest}")
+        print(f"报告：{REPORT_PATH}")
+        return 0
     effective_window = int(dataset["effective_window_tokens"])
     payload: dict[str, Any] = {
         "metadata": {
@@ -882,6 +999,7 @@ def main() -> int:
             "effective_window_tokens": effective_window,
             "dataset_version": dataset["version"],
             "benchmark_spend_cny": 0.0,
+            "run_id": uuid.uuid4().hex[:12],
         },
         "pricing": dataset["pricing_cny_per_million_tokens"],
         "offline_probes": probes,
@@ -925,6 +1043,7 @@ def main() -> int:
                     api_key=api_key,
                     budget=budget,
                     effective_window=effective_window,
+                    run_id=payload["metadata"]["run_id"],
                 )
                 results.append(replay)
                 payload["source_snapshots"][scenario["id"]] = source_meta
@@ -950,6 +1069,8 @@ def main() -> int:
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     latest = RESULTS_DIR / "latest.json"
     latest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    history = RESULTS_DIR / f"{payload['metadata']['run_id']}.json"
+    history.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     REPORT_PATH.write_text(render_report(payload), encoding="utf-8")
     print(f"结果：{latest}")
     print(f"报告：{REPORT_PATH}")

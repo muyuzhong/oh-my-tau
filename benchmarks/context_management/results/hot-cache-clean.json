@@ -1,0 +1,822 @@
+{
+  "metadata": {
+    "generated_at": "2026-07-21T11:50:05.067641+00:00",
+    "online": true,
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.deepseek.com",
+    "code_model_context_tokens": 200000,
+    "effective_window_tokens": 180000,
+    "dataset_version": 1,
+    "benchmark_spend_cny": 0.79367812,
+    "run_id": "6407c92e2723"
+  },
+  "pricing": {
+    "cache_hit_input": 0.02,
+    "cache_miss_input": 1.0,
+    "output": 2.0
+  },
+  "offline_probes": [
+    {
+      "probe": "large_result_persistence",
+      "before_chars": 107704,
+      "after_chars": 5635,
+      "reduction": 0.9476806803832727,
+      "full_copy_persisted": true
+    },
+    {
+      "probe": "dynamic_budget_0.55",
+      "before_chars": 240000,
+      "after_chars": 119860,
+      "reduction": 0.5005833333333334
+    },
+    {
+      "probe": "dynamic_budget_0.72",
+      "before_chars": 240000,
+      "after_chars": 59860,
+      "reduction": 0.7505833333333334
+    },
+    {
+      "probe": "snip_hot_below_override",
+      "snipped_results": 0,
+      "kept_results": 8
+    },
+    {
+      "probe": "snip_cold",
+      "snipped_results": 5,
+      "kept_results": 3
+    },
+    {
+      "probe": "snip_hot_override",
+      "snipped_results": 5,
+      "kept_results": 3
+    },
+    {
+      "probe": "microcompact_after_idle",
+      "cleared_results": 5,
+      "kept_results": 3
+    }
+  ],
+  "source_snapshots": {
+    "hot_cache_progressive": [
+      {
+        "path": "lion_code/agent.py",
+        "bytes": 91548,
+        "sha256": "c6d4abb54eb4ef1649dc0d87350c9d63d911dca7c3550ffdb85515e2fb40c419"
+      },
+      {
+        "path": "lion_code/prompt.py",
+        "bytes": 18339,
+        "sha256": "e58447ef083cff1a072e1da467de17f41c182f224cb918aa67bb134e51ace8bb"
+      },
+      {
+        "path": "lion_code/memory.py",
+        "bytes": 13708,
+        "sha256": "1ee221fdae8132158e0cde9ae5a34b7883405106837d89289ae38b97f5bb4702"
+      }
+    ]
+  },
+  "scenario_results": [
+    {
+      "scenario_id": "hot_cache_progressive",
+      "scenario_name": "热缓存下的渐进式压缩",
+      "variant": "raw",
+      "calls": [
+        {
+          "kind": "turn",
+          "turn": 1,
+          "usage": {
+            "prompt_tokens": 14831,
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 14831,
+            "completion_tokens": 1,
+            "total_tokens": 14832
+          },
+          "cost_cny": 0.014833,
+          "effective_window_tokens": 180000,
+          "utilization": 0.08239444444444445
+        },
+        {
+          "kind": "turn",
+          "turn": 2,
+          "usage": {
+            "prompt_tokens": 28289,
+            "cache_hit_tokens": 14720,
+            "cache_miss_tokens": 13569,
+            "completion_tokens": 1,
+            "total_tokens": 28290
+          },
+          "cost_cny": 0.0138654,
+          "effective_window_tokens": 180000,
+          "utilization": 0.1571611111111111
+        },
+        {
+          "kind": "turn",
+          "turn": 3,
+          "usage": {
+            "prompt_tokens": 41747,
+            "cache_hit_tokens": 28288,
+            "cache_miss_tokens": 13459,
+            "completion_tokens": 1,
+            "total_tokens": 41748
+          },
+          "cost_cny": 0.014026760000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.2319277777777778
+        },
+        {
+          "kind": "turn",
+          "turn": 4,
+          "usage": {
+            "prompt_tokens": 55229,
+            "cache_hit_tokens": 41728,
+            "cache_miss_tokens": 13501,
+            "completion_tokens": 1,
+            "total_tokens": 55230
+          },
+          "cost_cny": 0.014337560000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.30682777777777775
+        },
+        {
+          "kind": "turn",
+          "turn": 5,
+          "usage": {
+            "prompt_tokens": 68687,
+            "cache_hit_tokens": 55168,
+            "cache_miss_tokens": 13519,
+            "completion_tokens": 1,
+            "total_tokens": 68688
+          },
+          "cost_cny": 0.01462436,
+          "effective_window_tokens": 180000,
+          "utilization": 0.38159444444444446
+        },
+        {
+          "kind": "turn",
+          "turn": 6,
+          "usage": {
+            "prompt_tokens": 82145,
+            "cache_hit_tokens": 68608,
+            "cache_miss_tokens": 13537,
+            "completion_tokens": 1,
+            "total_tokens": 82146
+          },
+          "cost_cny": 0.014911160000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.4563611111111111
+        },
+        {
+          "kind": "turn",
+          "turn": 7,
+          "usage": {
+            "prompt_tokens": 95630,
+            "cache_hit_tokens": 82048,
+            "cache_miss_tokens": 13582,
+            "completion_tokens": 1,
+            "total_tokens": 95631
+          },
+          "cost_cny": 0.015224960000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.5312777777777777
+        },
+        {
+          "kind": "turn",
+          "turn": 8,
+          "usage": {
+            "prompt_tokens": 109088,
+            "cache_hit_tokens": 95616,
+            "cache_miss_tokens": 13472,
+            "completion_tokens": 1,
+            "total_tokens": 109089
+          },
+          "cost_cny": 0.01538632,
+          "effective_window_tokens": 180000,
+          "utilization": 0.6060444444444445
+        },
+        {
+          "kind": "turn",
+          "turn": 9,
+          "usage": {
+            "prompt_tokens": 122546,
+            "cache_hit_tokens": 109056,
+            "cache_miss_tokens": 13490,
+            "completion_tokens": 1,
+            "total_tokens": 122547
+          },
+          "cost_cny": 0.01567312,
+          "effective_window_tokens": 180000,
+          "utilization": 0.6808111111111111
+        },
+        {
+          "kind": "retention",
+          "turn": 10,
+          "usage": {
+            "prompt_tokens": 121321,
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 121321,
+            "completion_tokens": 52,
+            "total_tokens": 121373
+          },
+          "cost_cny": 0.121425,
+          "effective_window_tokens": 180000,
+          "utilization": 0.6740055555555555
+        }
+      ],
+      "events": {
+        "persisted_results": 0,
+        "budget_rewrites": 0,
+        "snipped_results": 0,
+        "microcompacted_results": 0,
+        "summaries": 0
+      },
+      "retention": {
+        "expected": {
+          "缓存策略": "HOT-CACHE-KEEP-PREFIX",
+          "保留数量": "KEEP_RECENT_RESULTS=3",
+          "强制阈值": "SNIP_HOT_OVERRIDE=0.75"
+        },
+        "response": {
+          "缓存策略": "HOT-CACHE-KEEP-PREFIX",
+          "保留数量": "KEEP_RECENT_RESULTS=3",
+          "强制阈值": "SNIP_HOT_OVERRIDE=0.75"
+        },
+        "matched": {
+          "缓存策略": true,
+          "保留数量": true,
+          "强制阈值": true
+        },
+        "score": 1.0,
+        "normalized_matched": {
+          "缓存策略": true,
+          "保留数量": true,
+          "强制阈值": true
+        },
+        "normalized_score": 1.0,
+        "value_matched": {
+          "缓存策略": true,
+          "保留数量": true,
+          "强制阈值": true
+        },
+        "value_score": 1.0
+      },
+      "totals": {
+        "all_calls": 10,
+        "summary_calls": 0,
+        "all_usage": {
+          "prompt_tokens": 739513,
+          "cache_hit_tokens": 495232,
+          "cache_miss_tokens": 244281,
+          "completion_tokens": 61,
+          "total_tokens": 739574
+        },
+        "normal_usage": {
+          "prompt_tokens": 739513,
+          "cache_hit_tokens": 495232,
+          "cache_miss_tokens": 244281,
+          "completion_tokens": 61,
+          "total_tokens": 739574
+        },
+        "total_cost_cny": 0.25430764,
+        "peak_prompt_tokens": 122546,
+        "over_effective_window_calls": 0,
+        "cache_hit_rate": 0.6696731497620731,
+        "retention_score": 1.0,
+        "retention_normalized_score": 1.0,
+        "retention_value_score": 1.0
+      }
+    },
+    {
+      "scenario_id": "hot_cache_progressive",
+      "scenario_name": "热缓存下的渐进式压缩",
+      "variant": "managed",
+      "calls": [
+        {
+          "kind": "turn",
+          "turn": 1,
+          "usage": {
+            "prompt_tokens": 14831,
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 14831,
+            "completion_tokens": 1,
+            "total_tokens": 14832
+          },
+          "cost_cny": 0.014833,
+          "effective_window_tokens": 180000,
+          "utilization": 0.08239444444444445
+        },
+        {
+          "kind": "turn",
+          "turn": 2,
+          "usage": {
+            "prompt_tokens": 28289,
+            "cache_hit_tokens": 14720,
+            "cache_miss_tokens": 13569,
+            "completion_tokens": 1,
+            "total_tokens": 28290
+          },
+          "cost_cny": 0.0138654,
+          "effective_window_tokens": 180000,
+          "utilization": 0.1571611111111111
+        },
+        {
+          "kind": "turn",
+          "turn": 3,
+          "usage": {
+            "prompt_tokens": 41747,
+            "cache_hit_tokens": 28288,
+            "cache_miss_tokens": 13459,
+            "completion_tokens": 1,
+            "total_tokens": 41748
+          },
+          "cost_cny": 0.014026760000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.2319277777777778
+        },
+        {
+          "kind": "turn",
+          "turn": 4,
+          "usage": {
+            "prompt_tokens": 55229,
+            "cache_hit_tokens": 41728,
+            "cache_miss_tokens": 13501,
+            "completion_tokens": 1,
+            "total_tokens": 55230
+          },
+          "cost_cny": 0.014337560000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.30682777777777775
+        },
+        {
+          "kind": "turn",
+          "turn": 5,
+          "usage": {
+            "prompt_tokens": 68687,
+            "cache_hit_tokens": 55168,
+            "cache_miss_tokens": 13519,
+            "completion_tokens": 1,
+            "total_tokens": 68688
+          },
+          "cost_cny": 0.01462436,
+          "effective_window_tokens": 180000,
+          "utilization": 0.38159444444444446
+        },
+        {
+          "kind": "turn",
+          "turn": 6,
+          "usage": {
+            "prompt_tokens": 82145,
+            "cache_hit_tokens": 68608,
+            "cache_miss_tokens": 13537,
+            "completion_tokens": 1,
+            "total_tokens": 82146
+          },
+          "cost_cny": 0.014911160000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.4563611111111111
+        },
+        {
+          "kind": "turn",
+          "turn": 7,
+          "usage": {
+            "prompt_tokens": 95630,
+            "cache_hit_tokens": 82048,
+            "cache_miss_tokens": 13582,
+            "completion_tokens": 1,
+            "total_tokens": 95631
+          },
+          "cost_cny": 0.015224960000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.5312777777777777
+        },
+        {
+          "kind": "turn",
+          "turn": 8,
+          "usage": {
+            "prompt_tokens": 109088,
+            "cache_hit_tokens": 95616,
+            "cache_miss_tokens": 13472,
+            "completion_tokens": 1,
+            "total_tokens": 109089
+          },
+          "cost_cny": 0.01538632,
+          "effective_window_tokens": 180000,
+          "utilization": 0.6060444444444445
+        },
+        {
+          "kind": "turn",
+          "turn": 9,
+          "usage": {
+            "prompt_tokens": 122546,
+            "cache_hit_tokens": 109056,
+            "cache_miss_tokens": 13490,
+            "completion_tokens": 1,
+            "total_tokens": 122547
+          },
+          "cost_cny": 0.01567312,
+          "effective_window_tokens": 180000,
+          "utilization": 0.6808111111111111
+        },
+        {
+          "kind": "retention",
+          "turn": 10,
+          "usage": {
+            "prompt_tokens": 121321,
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 121321,
+            "completion_tokens": 52,
+            "total_tokens": 121373
+          },
+          "cost_cny": 0.121425,
+          "effective_window_tokens": 180000,
+          "utilization": 0.6740055555555555
+        }
+      ],
+      "events": {
+        "persisted_results": 0,
+        "budget_rewrites": 0,
+        "snipped_results": 0,
+        "microcompacted_results": 0,
+        "summaries": 0
+      },
+      "retention": {
+        "expected": {
+          "缓存策略": "HOT-CACHE-KEEP-PREFIX",
+          "保留数量": "KEEP_RECENT_RESULTS=3",
+          "强制阈值": "SNIP_HOT_OVERRIDE=0.75"
+        },
+        "response": {
+          "缓存策略": "HOT-CACHE-KEEP-PREFIX",
+          "保留数量": "KEEP_RECENT_RESULTS=3",
+          "强制阈值": "SNIP_HOT_OVERRIDE=0.75"
+        },
+        "matched": {
+          "缓存策略": true,
+          "保留数量": true,
+          "强制阈值": true
+        },
+        "score": 1.0,
+        "normalized_matched": {
+          "缓存策略": true,
+          "保留数量": true,
+          "强制阈值": true
+        },
+        "normalized_score": 1.0,
+        "value_matched": {
+          "缓存策略": true,
+          "保留数量": true,
+          "强制阈值": true
+        },
+        "value_score": 1.0
+      },
+      "totals": {
+        "all_calls": 10,
+        "summary_calls": 0,
+        "all_usage": {
+          "prompt_tokens": 739513,
+          "cache_hit_tokens": 495232,
+          "cache_miss_tokens": 244281,
+          "completion_tokens": 61,
+          "total_tokens": 739574
+        },
+        "normal_usage": {
+          "prompt_tokens": 739513,
+          "cache_hit_tokens": 495232,
+          "cache_miss_tokens": 244281,
+          "completion_tokens": 61,
+          "total_tokens": 739574
+        },
+        "total_cost_cny": 0.25430764,
+        "peak_prompt_tokens": 122546,
+        "over_effective_window_calls": 0,
+        "cache_hit_rate": 0.6696731497620731,
+        "retention_score": 1.0,
+        "retention_normalized_score": 1.0,
+        "retention_value_score": 1.0
+      }
+    },
+    {
+      "scenario_id": "hot_cache_progressive",
+      "scenario_name": "热缓存下的渐进式压缩",
+      "variant": "eager_ablation",
+      "calls": [
+        {
+          "kind": "turn",
+          "turn": 1,
+          "usage": {
+            "prompt_tokens": 14834,
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 14834,
+            "completion_tokens": 1,
+            "total_tokens": 14835
+          },
+          "cost_cny": 0.014836,
+          "effective_window_tokens": 180000,
+          "utilization": 0.08241111111111112
+        },
+        {
+          "kind": "turn",
+          "turn": 2,
+          "usage": {
+            "prompt_tokens": 28292,
+            "cache_hit_tokens": 14720,
+            "cache_miss_tokens": 13572,
+            "completion_tokens": 1,
+            "total_tokens": 28293
+          },
+          "cost_cny": 0.013868400000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.15717777777777778
+        },
+        {
+          "kind": "turn",
+          "turn": 3,
+          "usage": {
+            "prompt_tokens": 41750,
+            "cache_hit_tokens": 28288,
+            "cache_miss_tokens": 13462,
+            "completion_tokens": 1,
+            "total_tokens": 41751
+          },
+          "cost_cny": 0.01402976,
+          "effective_window_tokens": 180000,
+          "utilization": 0.23194444444444445
+        },
+        {
+          "kind": "turn",
+          "turn": 4,
+          "usage": {
+            "prompt_tokens": 55232,
+            "cache_hit_tokens": 41728,
+            "cache_miss_tokens": 13504,
+            "completion_tokens": 1,
+            "total_tokens": 55233
+          },
+          "cost_cny": 0.01434056,
+          "effective_window_tokens": 180000,
+          "utilization": 0.3068444444444444
+        },
+        {
+          "kind": "turn",
+          "turn": 5,
+          "usage": {
+            "prompt_tokens": 68690,
+            "cache_hit_tokens": 55168,
+            "cache_miss_tokens": 13522,
+            "completion_tokens": 1,
+            "total_tokens": 68691
+          },
+          "cost_cny": 0.014627359999999999,
+          "effective_window_tokens": 180000,
+          "utilization": 0.3816111111111111
+        },
+        {
+          "kind": "turn",
+          "turn": 6,
+          "usage": {
+            "prompt_tokens": 82148,
+            "cache_hit_tokens": 68608,
+            "cache_miss_tokens": 13540,
+            "completion_tokens": 1,
+            "total_tokens": 82149
+          },
+          "cost_cny": 0.014914160000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.45637777777777777
+        },
+        {
+          "kind": "turn",
+          "turn": 7,
+          "usage": {
+            "prompt_tokens": 95633,
+            "cache_hit_tokens": 82048,
+            "cache_miss_tokens": 13585,
+            "completion_tokens": 1,
+            "total_tokens": 95634
+          },
+          "cost_cny": 0.01522796,
+          "effective_window_tokens": 180000,
+          "utilization": 0.5312944444444444
+        },
+        {
+          "kind": "turn",
+          "turn": 8,
+          "usage": {
+            "prompt_tokens": 109091,
+            "cache_hit_tokens": 95616,
+            "cache_miss_tokens": 13475,
+            "completion_tokens": 1,
+            "total_tokens": 109092
+          },
+          "cost_cny": 0.015389320000000001,
+          "effective_window_tokens": 180000,
+          "utilization": 0.6060611111111112
+        },
+        {
+          "kind": "turn",
+          "turn": 9,
+          "usage": {
+            "prompt_tokens": 85871,
+            "cache_hit_tokens": 2816,
+            "cache_miss_tokens": 83055,
+            "completion_tokens": 1,
+            "total_tokens": 85872
+          },
+          "cost_cny": 0.08311332,
+          "effective_window_tokens": 180000,
+          "utilization": 0.4770611111111111
+        },
+        {
+          "kind": "retention",
+          "turn": 10,
+          "usage": {
+            "prompt_tokens": 84646,
+            "cache_hit_tokens": 0,
+            "cache_miss_tokens": 84646,
+            "completion_tokens": 35,
+            "total_tokens": 84681
+          },
+          "cost_cny": 0.084716,
+          "effective_window_tokens": 180000,
+          "utilization": 0.47025555555555554
+        }
+      ],
+      "events": {
+        "persisted_results": 0,
+        "budget_rewrites": 0,
+        "snipped_results": 6,
+        "microcompacted_results": 0,
+        "summaries": 0
+      },
+      "retention": {
+        "expected": {
+          "缓存策略": "HOT-CACHE-KEEP-PREFIX",
+          "保留数量": "KEEP_RECENT_RESULTS=3",
+          "强制阈值": "SNIP_HOT_OVERRIDE=0.75"
+        },
+        "response": {
+          "缓存策略": "HOT-CACHE-KEEP-PREFIX",
+          "保留数量": 3,
+          "强制阈值": 0.75
+        },
+        "matched": {
+          "缓存策略": true,
+          "保留数量": false,
+          "强制阈值": false
+        },
+        "score": 0.3333333333333333,
+        "normalized_matched": {
+          "缓存策略": true,
+          "保留数量": false,
+          "强制阈值": false
+        },
+        "normalized_score": 0.3333333333333333,
+        "value_matched": {
+          "缓存策略": true,
+          "保留数量": true,
+          "强制阈值": true
+        },
+        "value_score": 1.0
+      },
+      "totals": {
+        "all_calls": 10,
+        "summary_calls": 0,
+        "all_usage": {
+          "prompt_tokens": 666187,
+          "cache_hit_tokens": 388992,
+          "cache_miss_tokens": 277195,
+          "completion_tokens": 44,
+          "total_tokens": 666231
+        },
+        "normal_usage": {
+          "prompt_tokens": 666187,
+          "cache_hit_tokens": 388992,
+          "cache_miss_tokens": 277195,
+          "completion_tokens": 44,
+          "total_tokens": 666231
+        },
+        "total_cost_cny": 0.28506284,
+        "peak_prompt_tokens": 109091,
+        "over_effective_window_calls": 0,
+        "cache_hit_rate": 0.5839081218937026,
+        "retention_score": 0.3333333333333333,
+        "retention_normalized_score": 0.3333333333333333,
+        "retention_value_score": 1.0
+      }
+    }
+  ],
+  "aggregate": {
+    "eager_ablation": {
+      "scenario_count": 1,
+      "call_count": 10,
+      "summary_call_count": 0,
+      "all_usage": {
+        "prompt_tokens": 666187,
+        "cache_hit_tokens": 388992,
+        "cache_miss_tokens": 277195,
+        "completion_tokens": 44,
+        "total_tokens": 666231
+      },
+      "normal_usage": {
+        "prompt_tokens": 666187,
+        "cache_hit_tokens": 388992,
+        "cache_miss_tokens": 277195,
+        "completion_tokens": 44,
+        "total_tokens": 666231
+      },
+      "total_cost_cny": 0.28506284,
+      "peak_prompt_tokens": 109091,
+      "over_effective_window_calls": 0,
+      "cache_hit_rate": 0.5839081218937026,
+      "retention_mean": 0.3333333333333333,
+      "retention_normalized_mean": 0.3333333333333333,
+      "retention_value_mean": 1.0,
+      "events": {
+        "persisted_results": 0,
+        "budget_rewrites": 0,
+        "snipped_results": 6,
+        "microcompacted_results": 0,
+        "summaries": 0
+      }
+    },
+    "managed": {
+      "scenario_count": 1,
+      "call_count": 10,
+      "summary_call_count": 0,
+      "all_usage": {
+        "prompt_tokens": 739513,
+        "cache_hit_tokens": 495232,
+        "cache_miss_tokens": 244281,
+        "completion_tokens": 61,
+        "total_tokens": 739574
+      },
+      "normal_usage": {
+        "prompt_tokens": 739513,
+        "cache_hit_tokens": 495232,
+        "cache_miss_tokens": 244281,
+        "completion_tokens": 61,
+        "total_tokens": 739574
+      },
+      "total_cost_cny": 0.25430764,
+      "peak_prompt_tokens": 122546,
+      "over_effective_window_calls": 0,
+      "cache_hit_rate": 0.6696731497620731,
+      "retention_mean": 1.0,
+      "retention_normalized_mean": 1.0,
+      "retention_value_mean": 1.0,
+      "events": {
+        "persisted_results": 0,
+        "budget_rewrites": 0,
+        "snipped_results": 0,
+        "microcompacted_results": 0,
+        "summaries": 0
+      }
+    },
+    "raw": {
+      "scenario_count": 1,
+      "call_count": 10,
+      "summary_call_count": 0,
+      "all_usage": {
+        "prompt_tokens": 739513,
+        "cache_hit_tokens": 495232,
+        "cache_miss_tokens": 244281,
+        "completion_tokens": 61,
+        "total_tokens": 739574
+      },
+      "normal_usage": {
+        "prompt_tokens": 739513,
+        "cache_hit_tokens": 495232,
+        "cache_miss_tokens": 244281,
+        "completion_tokens": 61,
+        "total_tokens": 739574
+      },
+      "total_cost_cny": 0.25430764,
+      "peak_prompt_tokens": 122546,
+      "over_effective_window_calls": 0,
+      "cache_hit_rate": 0.6696731497620731,
+      "retention_mean": 1.0,
+      "retention_normalized_mean": 1.0,
+      "retention_value_mean": 1.0,
+      "events": {
+        "persisted_results": 0,
+        "budget_rewrites": 0,
+        "snipped_results": 0,
+        "microcompacted_results": 0,
+        "summaries": 0
+      }
+    }
+  },
+  "comparison": {
+    "normal_input_token_reduction": 0.0,
+    "all_input_token_reduction_including_summary": 0.0,
+    "peak_prompt_reduction": 0.0,
+    "actual_total_cost_reduction": 0.0,
+    "raw_cache_hit_rate": 0.6696731497620731,
+    "managed_cache_hit_rate": 0.6696731497620731,
+    "raw_retention": 1.0,
+    "managed_retention": 1.0,
+    "raw_retention_normalized": 1.0,
+    "managed_retention_normalized": 1.0,
+    "raw_retention_value": 1.0,
+    "managed_retention_value": 1.0
+  }
+}

@@ -32,11 +32,11 @@
     {
       "id": "hot_cache_progressive",
       "name": "热缓存下的渐进式压缩",
-      "purpose": "让上下文依次跨过 50%、60% 和 75% 阈值，观察动态预算、热缓存保护及高水位强制清理。",
-      "turns": 10,
+      "purpose": "让上下文跨过 50% 和 60% 但保持在 75% 以下，专门观察热缓存保护；75% 高水位强制清理由离线探针单独验证。",
+      "turns": 9,
       "tool_name": "read_file",
-      "tool_payload_bytes": 90000,
-      "user_payload_bytes": 0,
+      "tool_payload_bytes": 25000,
+      "user_payload_bytes": 30000,
       "source_files": [
         "lion_code/agent.py",
         "lion_code/prompt.py",
