@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "title": "Lion Code 上下文管理长会话回放测试集",
+  "language": "zh-CN",
+  "description": "从当前仓库源码确定性生成工具输出和设计讨论记录，覆盖超大结果持久化、动态预算裁剪、缓存热度保护、冷缓存清理和全量摘要。为避免提交数 MB 重复文本，文件只保存生成规则；benchmark.py 会在运行时生成完整消息。",
+  "effective_window_tokens": 180000,
+  "pricing_cny_per_million_tokens": {
+    "cache_hit_input": 0.02,
+    "cache_miss_input": 1.0,
+    "output": 2.0
+  },
+  "scenarios": [
+    {
+      "id": "large_result_persistence",
+      "name": "超大文件读取",
+      "purpose": "主要触发第一级：超过 30 KiB 的工具结果先完整持久化，再以预览进入上下文。",
+      "turns": 6,
+      "tool_name": "read_file",
+      "tool_payload_bytes": 120000,
+      "user_payload_bytes": 0,
+      "source_files": [
+        "lion_code/agent.py",
+        "lion_code/tools.py"
+      ],
+      "idle_before_turns": [],
+      "facts": [
+        {"turn": 1, "key": "项目代号", "value": "LION-PERSIST-7319"},
+        {"turn": 2, "key": "关键文件", "value": "lion_code/agent.py"},
+        {"turn": 3, "key": "验证命令", "value": "python -m pytest -q"}
+      ]
+    },
+    {
+      "id": "hot_cache_progressive",
+      "name": "热缓存下的渐进式压缩",
+      "purpose": "让上下文依次跨过 50%、60% 和 75% 阈值，观察动态预算、热缓存保护及高水位强制清理。",
+      "turns": 10,
+      "tool_name": "read_file",
+      "tool_payload_bytes": 90000,
+      "user_payload_bytes": 0,
+      "source_files": [
+        "lion_code/agent.py",
+        "lion_code/prompt.py",
+        "lion_code/memory.py"
+      ],
+      "idle_before_turns": [],
+      "facts": [
+        {"turn": 1, "key": "缓存策略", "value": "HOT-CACHE-KEEP-PREFIX"},
+        {"turn": 4, "key": "保留数量", "value": "KEEP_RECENT_RESULTS=3"},
+        {"turn": 7, "key": "强制阈值", "value": "SNIP_HOT_OVERRIDE=0.75"}
+      ]
+    },
+    {
+      "id": "cold_cache_cleanup",
+      "name": "冷缓存过期结果清理",
+      "purpose": "在指定轮次模拟超过五分钟空闲，验证旧工具结果清理以及缓存前缀改写产生的命中变化。",
+      "turns": 10,
+      "tool_name": "grep_search",
+      "tool_payload_bytes": 90000,
+      "user_payload_bytes": 0,
+      "source_files": [
+        "lion_code/agent.py",
+        "lion_code/autonomy.py",
+        "lion_code/tools.py"
+      ],
+      "idle_before_turns": [8],
+      "facts": [
+        {"turn": 1, "key": "清理等待", "value": "MICROCOMPACT_IDLE_S=300"},
+        {"turn": 4, "key": "占位文本", "value": "Old result cleared"},
+        {"turn": 7, "key": "恢复文件", "value": "lion_code/autonomy.py"}
+      ]
+    },
+    {
+      "id": "full_summary_retention",
+      "name": "全量摘要与事实保留",
+      "purpose": "用不会被工具结果裁剪的长设计讨论推动上下文越过 85%，测量摘要调用成本、压缩后峰值和关键事实保留率。",
+      "turns": 8,
+      "tool_name": "list_files",
+      "tool_payload_bytes": 5000,
+      "user_payload_bytes": 80000,
+      "source_files": [
+        "README.md",
+        "lion_code/agent.py",
+        "lion_code/prompt.py"
+      ],
+      "idle_before_turns": [],
+      "facts": [
+        {"turn": 1, "key": "摘要代号", "value": "LION-SUMMARY-8642"},
+        {"turn": 3, "key": "摘要阈值", "value": "AUTOCOMPACT=0.85"},
+        {"turn": 5, "key": "必须保留路径", "value": "lion_code/prompt.py"},
+        {"turn": 7, "key": "最终决策", "value": "先保留事实再压缩冗余输出"}
+      ]
+    }
+  ]
+}

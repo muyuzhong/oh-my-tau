@@ -1,0 +1,60 @@
+{
+  "metadata": {
+    "generated_at": "2026-07-21T11:28:21.873422+00:00",
+    "online": false,
+    "model": "deepseek-v4-flash",
+    "base_url": "https://api.deepseek.com",
+    "code_model_context_tokens": 200000,
+    "effective_window_tokens": 180000,
+    "dataset_version": 1,
+    "benchmark_spend_cny": 0.0
+  },
+  "pricing": {
+    "cache_hit_input": 0.02,
+    "cache_miss_input": 1.0,
+    "output": 2.0
+  },
+  "offline_probes": [
+    {
+      "probe": "large_result_persistence",
+      "before_chars": 107704,
+      "after_chars": 5635,
+      "reduction": 0.9476806803832727,
+      "full_copy_persisted": true
+    },
+    {
+      "probe": "dynamic_budget_0.55",
+      "before_chars": 240000,
+      "after_chars": 119860,
+      "reduction": 0.5005833333333334
+    },
+    {
+      "probe": "dynamic_budget_0.72",
+      "before_chars": 240000,
+      "after_chars": 59860,
+      "reduction": 0.7505833333333334
+    },
+    {
+      "probe": "snip_hot_below_override",
+      "snipped_results": 0,
+      "kept_results": 8
+    },
+    {
+      "probe": "snip_cold",
+      "snipped_results": 5,
+      "kept_results": 3
+    },
+    {
+      "probe": "snip_hot_override",
+      "snipped_results": 5,
+      "kept_results": 3
+    },
+    {
+      "probe": "microcompact_after_idle",
+      "cleared_results": 5,
+      "kept_results": 3
+    }
+  ],
+  "source_snapshots": {},
+  "scenario_results": []
+}

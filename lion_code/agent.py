@@ -1,6 +1,6 @@
-"""Agent core loop — dual backend (Anthropic + OpenAI compatible), streaming,
-4-layer compression, plan mode, sub-agents, budget control.
-Agent architecture inspired by Claude Code's published design."""
+"""Agent 核心循环：统一 Anthropic 与 OpenAI 兼容后端的流式调用、上下文压缩、
+Plan 模式、子 Agent、权限与预算控制。整体分层参考 Claude Code 的公开设计。
+"""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ from .prompt import build_system_prompt, build_static_system_prompt, build_dynam
 from .subagent import get_sub_agent_config
 from .mcp_client import McpManager
 
-# ─── Retry with exponential backoff ──────────────────────────
+# ─── 指数退避重试 ───────────────────────────────────────────
 
 
 def _is_retryable(error: Exception) -> bool:
@@ -99,7 +99,7 @@ async def _with_retry(fn, max_retries: int = 3):
             await asyncio.sleep(delay)
 
 
-# ─── Model context windows ──────────────────────────────────
+# ─── 模型上下文窗口 ─────────────────────────────────────────
 
 MODEL_CONTEXT = {
     "claude-opus-4-6": 200000,
@@ -116,7 +116,7 @@ def _get_context_window(model: str) -> int:
     return MODEL_CONTEXT.get(model, 200000)
 
 
-# ─── Thinking support detection ─────────────────────────────
+# ─── Thinking 能力检测 ──────────────────────────────────────
 
 
 def _model_supports_thinking(model: str) -> bool:
@@ -144,7 +144,7 @@ def _get_max_output_tokens(model: str) -> int:
     return 16384
 
 
-# ─── Convert tools to OpenAI format ─────────────────────────
+# ─── Anthropic 工具格式转 OpenAI 格式 ───────────────────────
 
 
 def _to_openai_tools(tools: list[ToolDef]) -> list[dict]:
@@ -161,23 +161,24 @@ def _to_openai_tools(tools: list[ToolDef]) -> list[dict]:
     ]
 
 
-# ─── Multi-tier compression constants ────────────────────────
+# ─── 多级上下文压缩参数 ─────────────────────────────────────
 
 SNIPPABLE_TOOLS = {"read_file", "grep_search", "list_files", "run_shell"}
 SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]"
 SNIP_THRESHOLD = 0.60
-# Above this utilization we snip even while the cache is hot: preserving the
-# cache is not worth risking a context overflow. Below it, a hot cache is left
-# untouched (see snip functions). Sits between SNIP_THRESHOLD and autocompact.
+# 利用率超过此值时，即使缓存仍热也执行 snip；此时避免上下文溢出比保住缓存更重要。
+# 低于该值则等待缓存变冷，阈值位于普通 snip 和 autocompact 之间。
 SNIP_HOT_OVERRIDE = 0.75
-MICROCOMPACT_IDLE_S = 5 * 60  # 5 minutes
+MICROCOMPACT_IDLE_S = 5 * 60  # 缓存空闲五分钟后才执行第三级清理。
 KEEP_RECENT_RESULTS = 3
 
 
-# ─── Agent ───────────────────────────────────────────────────
+# ─── Agent ──────────────────────────────────────────────────
 
 
 class Agent:
+    """协调模型调用、工具执行和会话状态的主运行时对象。"""
+
     def __init__(
         self,
         *,
@@ -209,72 +210,66 @@ class Agent:
 
         self.total_input_tokens = 0
         self.total_output_tokens = 0
-        self.total_cache_read_tokens = 0       # Prompt-cache hits (billed ~0.1x)
-        self.total_cache_creation_tokens = 0   # Prompt-cache writes (billed ~1.25x)
+        self.total_cache_read_tokens = 0       # Prompt cache 命中按约 0.1 倍计费。
+        self.total_cache_creation_tokens = 0   # Prompt cache 写入按约 1.25 倍计费。
         self.last_input_token_count = 0
         self.current_turns = 0
         self.last_api_call_time = 0.0
 
-        # /goal — session-scoped Stop-hook condition, pursued across turns
+        # /goal 是跨轮次、会话级的 Stop-hook 条件。
         self.active_goal: dict | None = None
-        self.goal_stop = False  # set on interrupt to break out of goal pursuit
+        self.goal_stop = False  # 中断时置位，使目标追踪循环尽快退出。
 
-        # /loop dynamic mode — set when the model calls schedule_wakeup during a
-        # tick, read (and cleared) by the loop driver after the turn converges.
+        # 动态 /loop 中，模型调用 schedule_wakeup 后写入；本轮收敛后由驱动器读取并清空。
         self.pending_wakeup: dict | None = None
-        self.loop_stop = False  # set on interrupt to break out of a running loop
-        # schedule_wakeup is routed to the internal executor only while a dynamic
-        # loop is active, so it can't shadow a same-named tool or be reached out
-        # of band.
+        self.loop_stop = False  # 中断时置位，使正在运行的 loop 尽快退出。
+        # schedule_wakeup 仅在动态 loop 激活时路由到内部执行器，避免覆盖同名外部工具，
+        # 也防止普通对话越权调用。
         self.schedule_wakeup_enabled = False
 
-        # Auto Mode — transcript-classifier denial tracking (DENIAL_LIMITS).
+        # Auto Mode 按 DENIAL_LIMITS 追踪连续和累计拒绝次数。
         self.auto_consecutive_denials = 0
         self.auto_total_denials = 0
 
-        # Abort support
+        # 当前异步任务用于把 Ctrl+C 传播到正在等待的模型或工具调用。
         self._aborted = False
         self._current_task: asyncio.Task | None = None
 
-        # Permission whitelist
+        # 仅缓存用户已确认的具体路径，不缓存宽泛的确认原因。
         self._confirmed_paths: set[str] = set()
 
-        # Plan mode state
+        # Plan 模式需保存进入前的权限模式，退出时恢复。
         self._pre_plan_mode: str | None = None
         self._plan_file_path: str | None = None
         self._plan_approval_fn: Callable[[str], Awaitable[dict]] | None = None
-        self._context_cleared: bool = False  # Set when plan approval clears context
+        self._context_cleared: bool = False  # Plan 审批选择清空上下文时置位。
 
-        # Thinking mode
+        # 根据用户开关和模型能力解析实际 Thinking 模式。
         self._thinking_mode = self._resolve_thinking_mode()
 
-        # Output buffer (sub-agents capture output)
+        # 子 Agent 使用缓冲区返回结果；主 Agent 直接输出到终端。
         self._output_buffer: list[str] | None = None
 
-        # Read-before-edit: track file read timestamps (absolutePath → mtime)
+        # 记录文件读取时的 mtime，落实“先读后改”并检测外部并发修改。
         self._read_file_state: dict[str, float] = {}
 
-        # MCP integration
+        # MCP 延迟到首次对话初始化，避免仅查看 --help 也启动外部进程。
         self._mcp_manager = McpManager()
         self._mcp_initialized = False
 
-        # Memory recall state — semantic prefetch per user turn. The handle
-        # lives on the instance so a recall that settles after this turn's
-        # last API call is carried over and injected next turn (issue #7).
+        # 每轮预取语义 Memory。句柄保存在实例上，因此若结果在本轮最后一次 API 调用后
+        # 才完成，可顺延到下一轮注入，而不会丢失（issue #7）。
         self._already_surfaced_memories: set[str] = set()
         self._session_memory_bytes = 0
         self._memory_prefetch: MemoryPrefetch | None = None
 
-        # Separate message histories
+        # 两种后端消息结构不同，分别保存，避免来回进行有损转换。
         self._anthropic_messages: list[dict] = []
         self._openai_messages: list[dict] = []
 
-        # Build system prompt with a static/dynamic split for prefix caching.
-        # A custom system prompt overrides both halves (all of it is treated as
-        # static). Otherwise the static core is cacheable, env/git/skills form
-        # the dynamic tail, and CLAUDE.md + date go into the FIRST user message
-        # as a <system-reminder> (Claude Code's prependUserContext) — see chat.
-        # Keeping project-specific content out of the system maximizes sharing.
+        # 系统提示词按前缀缓存拆成静态核心和动态尾部。自定义提示词整体视为静态；
+        # 默认路径则把环境、Git、Skill 放在动态尾部，并把 CLAUDE.md 与日期作为
+        # reminder 注入首条用户消息，尽量提高跨项目的缓存复用率。
         self._user_context_reminder = ""
         if custom_system_prompt:
             self._static_system_prompt = custom_system_prompt
@@ -293,8 +288,8 @@ class Agent:
         else:
             self._system_prompt = self._base_system_prompt
 
-        # Optional: cap the SDK's own retry layer (default 2). Set
-        # LION_CODE_SDK_MAX_RETRIES=0 to isolate our _with_retry in tests.
+        # 可限制 SDK 自带的重试层（默认 2）；测试可设 LION_CODE_SDK_MAX_RETRIES=0，
+        # 单独验证本模块的 _with_retry。
         _sdk_retries: dict[str, Any] = {}
         _rv = os.environ.get("LION_CODE_SDK_MAX_RETRIES")
         if _rv is not None and _rv != "":
@@ -302,7 +297,7 @@ class Agent:
                 _sdk_retries["max_retries"] = int(_rv)
             except ValueError:
                 pass
-        # Initialize clients
+        # 只初始化选中的协议客户端，后续可用 None 明确判断当前后端。
         if self.use_openai:
             self._openai_client = openai.AsyncOpenAI(base_url=api_base, api_key=api_key, **_sdk_retries)
             self._anthropic_client = None
@@ -317,13 +312,12 @@ class Agent:
             self._anthropic_client = anthropic.AsyncAnthropic(**kwargs)
             self._openai_client = None
 
-    # ─── Prefix caching (Anthropic) ─────────────────────────────
+    # ─── Anthropic 前缀缓存 ──────────────────────────────────
     def _build_anthropic_system(self) -> list[dict]:
-        """Build the `system` field as text blocks with a cache_control
-        breakpoint on the static core. Everything up to and including that block
-        (the tool schemas render before `system`, so they are covered too) is
-        cached server-side; the dynamic tail sits after the breakpoint. This is
-        Claude Code's scope-omitted path. See how-claude-code-works ch3.6."""
+        """构建带 cache_control 边界的 Anthropic system 文本块。
+
+        静态核心及其之前渲染的工具 schema 可由服务端缓存，动态尾部位于边界之后。
+        """
         plan_suffix = self._build_plan_mode_prompt() if self.permission_mode == "plan" else ""
         dynamic_text = (self._dynamic_system_context + plan_suffix).strip()
         blocks: list[dict] = [
@@ -334,15 +328,12 @@ class Agent:
         return blocks
 
     def _with_cache_breakpoints(self, messages: list[dict]) -> list[dict]:
-        """Return a COPY of the message list with a cache_control breakpoint on
-        the last message's final content block, so every prior turn stays in the
-        cached prefix and only the newest messages are processed. Pure: the
-        persistent history is never mutated with this API metadata (Claude Code
-        clones request params at the render layer for the same reason, keeping
-        session save / compact / restore clean). Faithful to CC's
-        assistantMessageToMessageParam, we look only at the very LAST block and
-        skip it when it is a thinking block (unstable content → hurts cache
-        hits). Only 1 message breakpoint + 1 system breakpoint per request."""
+        """在消息副本的最后一个稳定内容块上添加 cache_control 边界。
+
+        不修改持久历史，避免 API 元数据污染会话保存、压缩和恢复。thinking 内容不稳定，
+        放入缓存反而降低命中率，因此最后一块是 thinking 时跳过；每次请求最多增加一个
+        消息边界，另加一个 system 边界。
+        """
         if not messages:
             return messages
         out = list(messages)
@@ -369,10 +360,10 @@ class Agent:
         return self._current_task is not None and not self._current_task.done()
 
     def _build_side_query(self):
-        """Build a sideQuery callable for memory recall and the Auto Mode
-        classifier, works with both backends. temperature=0 for a deterministic
-        decision — the same input should always yield the same verdict (Claude
-        Code runs the classifier at temperature 0)."""
+        """构建供 Memory 召回和 Auto Mode 分类器共用的跨后端 sideQuery。
+
+        temperature 固定为 0，让相同输入尽可能得到稳定判定。
+        """
         if self._anthropic_client:
             client = self._anthropic_client
             model = self.model
@@ -409,7 +400,7 @@ class Agent:
     def set_plan_approval_fn(self, fn: Callable[[str], Awaitable[dict]]) -> None:
         self._plan_approval_fn = fn
 
-    # ─── Plan mode toggle ────────────────────────────────────
+    # ─── Plan 模式切换 ───────────────────────────────────────
 
     def toggle_plan_mode(self) -> str:
         if self.permission_mode == "plan":
@@ -434,10 +425,10 @@ class Agent:
     def get_token_usage(self) -> dict:
         return {"input": self.total_input_tokens, "output": self.total_output_tokens}
 
-    # ─── Main entry point ────────────────────────────────────
+    # ─── 主对话入口 ──────────────────────────────────────────
 
     async def chat(self, user_message: str) -> None:
-        # Lazily connect to MCP servers on first chat (main agent only)
+        # 主 Agent 首次对话才连接 MCP；子 Agent 复用已分配工具，不重复启动 Server。
         if not self._mcp_initialized and not self.is_sub_agent:
             self._mcp_initialized = True
             try:
@@ -461,7 +452,7 @@ class Agent:
             print_divider()
             self._auto_save()
 
-    # ─── Sub-agent entry point ────────────────────────────────
+    # ─── 子 Agent 单次运行入口 ───────────────────────────────
 
     async def run_once(self, prompt: str) -> dict:
         self._output_buffer = []
@@ -478,7 +469,7 @@ class Agent:
             },
         }
 
-    # ─── Output helper ────────────────────────────────────────
+    # ─── 输出分流 ────────────────────────────────────────────
 
     def _emit_text(self, text: str) -> None:
         if self._output_buffer is not None:
@@ -486,7 +477,7 @@ class Agent:
         else:
             print_assistant_text(text)
 
-    # ─── REPL commands ────────────────────────────────────────
+    # ─── REPL 命令状态 ───────────────────────────────────────
 
     def clear_history(self) -> None:
         self._anthropic_messages = []
@@ -514,8 +505,8 @@ class Agent:
         print_info(f"Tokens: {self.total_input_tokens} in / {self.total_output_tokens} out{cache_info}\n  Estimated cost: ${total:.4f}{budget_info}{turn_info}")
 
     def _get_current_cost_usd(self) -> float:
-        # Base input $3/Mtok. Cache read is 0.1x, cache write is 1.25x — the
-        # fixed multipliers Claude Code uses across every model tier.
+        # 统一按基础输入 $3/Mtok、缓存读取 0.1 倍、缓存写入 1.25 倍估算；
+        # 这是预算控制使用的近似值，不代表所有兼容供应商的实际账单。
         M = 1_000_000
         return (
             (self.total_input_tokens / M) * 3
@@ -534,19 +525,18 @@ class Agent:
     async def compact(self) -> None:
         await self._compact_conversation()
 
-    # ─── /goal pursuit ────────────────────────────────────────
-    # A prompt-based Stop hook: after each turn a separate evaluator model judges
-    # the condition; not-met feeds its reason into the next turn, met/impossible
-    # stop. See autonomy.py for the (verbatim) evaluator prompt.
+    # ─── /goal 追踪 ──────────────────────────────────────────
+    # 每轮结束后由独立评估模型检查 Stop-hook 条件；未满足的原因进入下一轮，
+    # 满足或判定不可能时停止。评估契约集中在 autonomy.py。
 
     def set_goal(self, condition: str) -> str:
-        """Set the active goal and return the first-turn directive to run."""
+        """设置活动目标并返回首轮执行指令。"""
         self.active_goal = {"condition": condition, "iterations": 0, "started_at": time.time(), "last_reason": None}
         print_info(f'◎ /goal active — Stop hook condition: "{condition}"')
         return goal_directive(condition)
 
     def show_goal(self) -> None:
-        """`/goal` with no argument prints the current goal's status."""
+        """处理无参数 `/goal`，显示当前目标状态。"""
         if not self.active_goal:
             print_info("No active goal. Set one with /goal <condition>.")
             return
@@ -558,16 +548,13 @@ class Agent:
         )
 
     async def pursue_goal(self, directive: str) -> None:
-        """Pursue the active goal: run the directive turn, then loop
-        evaluate → (not met) feed reason back → next turn, until met, impossible,
-        budget/iteration cap, or interrupt."""
+        """持续执行“运行 → 评估 → 反馈未满足原因”，直到目标终止条件出现。"""
         if not self.active_goal:
             return
         self.goal_stop = False
         try:
             await self.chat(directive)
-            # Evaluate the turn that just finished *before* any cap or next-turn
-            # decision, so the final turn's output is never left unjudged.
+            # 先评估刚结束的一轮，再检查上限或决定下一轮，确保最终输出不会漏判。
             while self.active_goal and not self.goal_stop and not self._aborted:
                 verdict = await self._evaluate_goal(self.active_goal["condition"])
                 if verdict["ok"]:
@@ -580,7 +567,7 @@ class Agent:
                     print_info(f"Hooks: Prompt hook condition judged impossible: {verdict['reason']}")
                     break
 
-                # Not met: record and decide whether another turn is allowed.
+                # 未满足时记录原因，再检查预算和硬上限是否允许继续。
                 self.active_goal["iterations"] += 1
                 self.active_goal["last_reason"] = verdict["reason"]
                 print_info(f"Hooks: Prompt hook condition was not met: {verdict['reason']}")
@@ -589,9 +576,8 @@ class Agent:
                 if budget["exceeded"]:
                     print_info(f"Goal stopped: {budget['reason']}")
                     break
-                # Hard ceiling regardless of --max-turns: --max-turns only counts
-                # tool-executing turns (_check_budget), so a no-tool goal loop
-                # needs an unconditional backstop of its own.
+                # --max-turns 只统计执行工具的轮次；纯文本目标循环可能永远不触发它，
+                # 因此仍需独立的无条件硬上限。
                 if self.active_goal["iterations"] >= GOAL_MAX_ITERATIONS:
                     print_info(f"Goal stopped: reached {GOAL_MAX_ITERATIONS} iterations without meeting the condition.")
                     break
@@ -604,17 +590,15 @@ class Agent:
             if self.goal_stop or self._aborted:
                 print_info("Goal pursuit interrupted.")
         finally:
-            # Clear on any exit (met / impossible / capped / interrupted) so a
-            # stale goal never lingers. Real Claude Code keeps it session-scoped
-            # and resumable; we don't implement resume.
+            # 无论满足、不可能、超限还是中断都清除状态，避免旧目标污染后续对话；
+            # 当前实现不支持恢复进行中的 /goal。
             self.active_goal = None
 
     async def _evaluate_goal(self, condition: str) -> dict:
-        """One evaluator pass over the just-finished turn's transcript. The
-        transcript is sent as its own assistant message (framed by a preceding
-        user message as data-to-judge), so a crafted turn can't smuggle fake
-        user/judge text into the evaluator's context — real Claude Code likewise
-        sends the turn as a separate transcript message, not inlined."""
+        """评估刚结束的一轮，并把 transcript 作为独立 assistant 消息发送。
+
+        前置 user 消息明确它只是待判定数据，防止被评估内容夹带伪造的用户或裁判文本。
+        """
         transcript = self._extract_last_assistant_text()
         messages = [
             {"role": "user", "content": GOAL_TRANSCRIPT_FRAMING},
@@ -625,14 +609,14 @@ class Agent:
             raw = await self._run_evaluator_query(GOAL_EVALUATOR_SYSTEM, messages)
             return parse_goal_verdict(raw)
         except Exception as e:
-            # Evaluator error → treat as not-met (never accidentally clears goal).
+            # 评估异常按“未满足”处理，绝不能因故障误清除目标。
             return {"ok": False, "reason": f"evaluator error: {e}", "impossible": False}
 
     async def _run_evaluator_query(self, system: str, messages: list) -> str:
-        """Send a role-separated evaluator query on whichever backend is
-        configured and return the model's text. Like _build_side_query but takes
-        a full messages array (that one is single-user-message, for memory
-        recall)."""
+        """通过当前后端发送保留 role 的评估请求，并返回模型文本。
+
+        与只接受单条 user 消息的 sideQuery 分开，避免 Memory 接口限制目标评估结构。
+        """
         if self._anthropic_client:
             resp = await self._anthropic_client.messages.create(
                 model=self.model, max_tokens=512, system=system, temperature=0, messages=messages,
@@ -647,10 +631,10 @@ class Agent:
         raise RuntimeError("no evaluator model available")
 
     async def _run_classifier_query(self, system: str, user: str, max_tokens: int) -> str:
-        """Single-message classifier query with a caller-chosen max_tokens, so the
-        two Auto Mode stages can size their budgets differently (stage 1 is a tiny
-        gate, stage 2 has room to think). temperature=0 for a deterministic
-        verdict, matching Claude Code's classifier."""
+        """发送单消息分类请求，由调用方为两个 Auto Mode 阶段分别设置 Token 预算。
+
+        第一阶段只需输出门控结论，第二阶段留出推理空间；temperature 固定为 0。
+        """
         if self._anthropic_client:
             resp = await self._anthropic_client.messages.create(
                 model=self.model, max_tokens=max_tokens, system=system, temperature=0,
@@ -666,8 +650,7 @@ class Agent:
         raise RuntimeError("no classifier model available")
 
     def _extract_last_assistant_text(self) -> str:
-        """The text of the most recent assistant turn, for the evaluator to
-        judge. Transcript-only: the action under judgement is the latest turn."""
+        """提取最近一轮 assistant 文本，确保评估目标只覆盖刚完成的动作。"""
         if self.use_openai:
             for m in reversed(self._openai_messages):
                 if m.get("role") == "assistant" and isinstance(m.get("content"), str):
@@ -686,22 +669,17 @@ class Agent:
                 )
         return ""
 
-    # ─── /loop — recurring or self-paced prompt ───────────────
-    # Unlike /goal (a stop-hook gate), /loop actively reschedules itself: a fixed
-    # interval, or — with no interval — a pace the main model picks via the
-    # schedule_wakeup tool. See autonomy.py for the parser and tool schema.
+    # ─── /loop：定时或自主节奏 ───────────────────────────────
+    # /goal 被动决定是否继续，/loop 则用固定间隔或 schedule_wakeup 主动安排下一轮。
 
     async def run_loop(self, raw_input: str) -> None:
-        """Entry point for the /loop command. Parses the input, then drives the
-        matching mode. Returns without looping if the input is malformed."""
+        """解析 /loop 输入并驱动对应模式；格式错误时直接返回。"""
         spec = parse_loop_input(raw_input)
         if "error" in spec:
             print_info(spec["error"])
             return
-        # Offer-cloud decision point (interval >=60min or daily wording). Real
-        # Claude Code asks whether to convert to a persistent cloud schedule that
-        # survives the session; this teaching CLI has no cloud, so we only
-        # surface it.
+        # 长间隔或 daily 措辞在真实客户端会触发持久化云计划建议；教学版没有云端，
+        # 这里只显式告知差异，仍在当前进程内运行。
         wants_cloud = (
             (spec["mode"] == "interval" and spec["interval_seconds"] >= OFFER_CLOUD_THRESHOLD_SECONDS)
             or is_daily_wording(raw_input)
@@ -723,10 +701,10 @@ class Agent:
             print_info("Loop interrupted.")
 
     async def _run_loop_interval(self, spec: dict) -> None:
-        """Interval mode: re-run the prompt every N seconds until interrupted or
-        the iteration cap. Corresponds to Claude Code's in-session CronCreate
-        path (session-only, not persisted). We use a plain timer in place of the
-        cron engine + KAIROS daemon."""
+        """按固定秒数重复提示词，直到中断、预算或迭代上限。
+
+        这是仅会话内生效的简化计时器，不提供 Cron/KAIROS 的持久化能力。
+        """
         print_info(
             f"⟳ /loop scheduled every {spec['interval_label']} (session-only, not persisted — "
             "dies when this process exits). Ctrl+C to stop."
@@ -741,9 +719,7 @@ class Agent:
             if budget["exceeded"]:
                 print_info(f"Loop stopped: {budget['reason']}")
                 break
-            # --max-turns also bounds loop ticks: _check_budget's turn counter
-            # only increments on tool-executing turns, so a plain-text loop would
-            # never hit it — treat --max-turns as a tick limit here too.
+            # 工具轮次计数无法约束纯文本 loop，因此这里同时把 --max-turns 解释为 tick 上限。
             if self.max_turns is not None and iterations >= self.max_turns:
                 print_info(f"Loop stopped: tick limit reached ({iterations} >= {self.max_turns}).")
                 break
@@ -756,11 +732,11 @@ class Agent:
                 break
 
     async def _run_loop_dynamic(self, spec: dict) -> None:
-        """Dynamic mode: run the tick, then let the main model self-pace via
-        schedule_wakeup. If it scheduled a wakeup, wait the (clamped) delay and
-        run again with the prompt it passed back; if it didn't, the loop has
-        converged. Faithful to "dynamic pacing is decided by the main model, no
-        separate evaluator." schedule_wakeup is exposed only for the loop."""
+        """让主模型通过 schedule_wakeup 自主安排下一轮。
+
+        有唤醒计划则等待裁剪后的延迟并复用回传提示词；没有计划即视为收敛。动态节奏
+        不使用独立评估器，schedule_wakeup 也只在 loop 生命周期内暴露。
+        """
         print_info(
             "⟳ /loop dynamic (self-paced) — the model schedules its own next run, or ends the "
             "loop. Ctrl+C to stop."
@@ -799,16 +775,14 @@ class Agent:
                     print_info("Loop stopped.")
                     break
         finally:
-            # Remove schedule_wakeup so it isn't exposed outside the dynamic loop.
+            # 动态 loop 结束后移除临时工具，防止普通对话继续调用内部调度入口。
             if not had_tool:
                 self.tools = [t for t in self.tools if t["name"] != "schedule_wakeup"]
             self.schedule_wakeup_enabled = False
             self.pending_wakeup = None
 
     def _execute_schedule_wakeup(self, inp: dict) -> str:
-        """schedule_wakeup executor: record the requested wakeup for the loop
-        driver. Delay is clamped to [60, 3600]; the driver reads pending_wakeup
-        after the turn converges."""
+        """记录唤醒请求；延迟限制在 [60, 3600]，本轮收敛后由 loop 驱动器读取。"""
         delay = clamp_wakeup_delay(inp.get("delaySeconds"))
         reason = inp.get("reason") if isinstance(inp.get("reason"), str) else ""
         prompt = inp.get("prompt") if isinstance(inp.get("prompt"), str) else ""
@@ -816,8 +790,7 @@ class Agent:
         return f"Wakeup scheduled in {delay}s. The loop will resume then; end your turn now."
 
     async def _interruptible_sleep(self, seconds: float) -> bool:
-        """Sleep that resolves early (returning True) if the loop is stopped or
-        the turn is aborted. Avoids blocking on a long interval past a Ctrl+C."""
+        """分段等待，并在 loop 停止或本轮 abort 时提前返回 True。"""
         import time as _time
         start = _time.time()
         while _time.time() - start < seconds:
@@ -827,64 +800,53 @@ class Agent:
         return False
 
     def stop_loop(self) -> None:
-        """Stop a running /loop (called from the REPL's interrupt handler)."""
+        """通知正在运行的 /loop 在最近的检查点停止。"""
         self.loop_stop = True
 
     def stop_goal(self) -> None:
-        """Stop a running /goal pursuit (called from the REPL's interrupt
-        handler). Takes effect at the next turn boundary — an in-flight turn is
-        aborted separately via abort()."""
+        """通知 /goal 在下一轮边界停止；正在进行的调用由 abort() 单独取消。"""
         self.goal_stop = True
 
-    # ─── Auto Mode — transcript-classifier permission gate ────
-    # In `auto` mode the classifier replaces the human confirm prompt: deny rules
-    # still hard-block, read-only tools fast-path through, everything else is
-    # judged by an LLM reading a reasoning-blind transcript projection.
+    # ─── Auto Mode：transcript 分类器权限门 ───────────────────
+    # auto 模式用分类器替代人工确认：deny 仍是硬边界，只读工具走快路径，
+    # 其余动作由 LLM 根据不含推理的 transcript 投影判断。
 
     async def _classify_tool_call(self, tool_name: str, inp: dict) -> dict:
-        """Decide a tool call in Auto Mode. Returns allow/deny like
-        check_permission, or "confirm" to hand back to a human once the denial
-        limits trip.
+        """以两阶段分类器决定工具调用，返回 allow、deny 或人工 confirm。
 
-        Two-stage, mirroring Claude Code's `both` mode: stage 1 is an aggressive
-        cheap gate (no user intent, no ALLOW exceptions — block if any rule
-        *could* apply); if stage 1 allows, we're done in one call. If stage 1
-        blocks, stage 2 does the careful adjudication that DOES weigh user intent
-        and can clear the block. Stage 2's verdict is final."""
-        # Hard floor first: deny rules bind even here.
+        第一阶段是低成本激进门，只要规则可能适用就拦截；若放行则一次调用结束。
+        被拦截后第二阶段结合用户意图谨慎复核，其结论为最终结果。
+        """
+        # 先执行静态 deny 硬边界，Auto Mode 也不能绕过。
         base = check_permission(tool_name, inp, "default", self._plan_file_path)
         if base["action"] == "deny":
             return base
-        # Fast-path: read-only / side-effect-free tools skip the classifier.
+        # 无副作用的只读工具直接放行，避免无意义的分类器成本。
         if tool_name in AUTO_MODE_FAST_PATH_TOOLS:
             return {"action": "allow"}
 
         if not self._anthropic_client and not self._openai_client:
-            # No evaluator available → fail closed. Defer to a human if present
-            # (interactive), else deny outright (headless: CC aborts here).
+            # 没有可用模型时 fail-closed：交互环境转人工，headless 直接拒绝。
             return self._auto_fallback(f"{tool_name} (auto-mode classifier unavailable)")
         try:
             rules = load_auto_mode_rules()
             history = self._openai_messages if self.use_openai else self._anthropic_messages
             transcript = build_classifier_transcript(history, {"tool_name": tool_name, "input": inp})
             system = build_classifier_system(rules)
-            # CLAUDE.md rides in the user message, not the system prompt — it is
-            # untrusted repo content.
+            # CLAUDE.md 是不可信仓库内容，只能放在 user 消息，不能获得 system 权威。
             claude_md = load_claude_md()
-            # Stage 1 — aggressive cheap gate (small token budget: just <block>…).
+            # 第一阶段只需简短 block 结论，因此使用较小 Token 预算。
             s1_raw = await self._run_classifier_query(system, classifier_user_message(rules, transcript, rules["suffix_stage1"], claude_md), 256)
             s1 = parse_block_verdict(s1_raw)
             if not s1["block"]:
-                verdict = s1  # stage 1 cleared it → allow (one call)
+                verdict = s1  # 第一阶段已放行，无需支付第二次模型调用成本。
             else:
-                # Stage 2 — careful adjudication (weighs user intent, can clear).
-                # More tokens: stage 2 may emit a <thinking> block first.
+                # 第二阶段会权衡用户意图并可能撤销拦截，允许先输出 thinking。
                 s2_raw = await self._run_classifier_query(system, classifier_user_message(rules, transcript, rules["suffix_stage2"], claude_md), 1024)
                 verdict = parse_block_verdict(s2_raw)
         except Exception as e:
-            # Any setup or classifier error → fail closed (block), matching CC's
-            # iron gate. Wrapping the asset load here keeps a missing/bad rules
-            # file from crashing the turn and orphaning the tool_use.
+            # 配置或分类器异常一律 fail-closed；在这里兜住资源加载错误，避免本轮崩溃
+            # 后留下没有配对结果的 tool_use。
             verdict = {"block": True, "reason": f"classifier error: {e}"}
 
         if not verdict["block"]:
@@ -897,34 +859,30 @@ class Agent:
             self.auto_consecutive_denials >= DENIAL_LIMITS["max_consecutive"]
             or self.auto_total_denials >= DENIAL_LIMITS["max_total"]
         ):
-            # Too many denials — the classifier may be stuck. Hand back to a human
-            # if interactive; deny in headless (CC aborts the agent here).
+            # 拒绝过多说明分类器可能卡住：交互环境转人工，headless 环境继续拒绝。
             print_info("Auto Mode: denial limit reached — handing back to manual confirmation.")
             return self._auto_fallback(f"[Auto Mode blocked] {verdict['reason']}")
         return {"action": "deny", "message": f"[Auto Mode] {verdict['reason']}"}
 
     def _auto_fallback(self, message: str) -> dict:
-        """Auto Mode fail-safe: defer to a human confirm if one is available,
-        else deny (headless). Never returns "allow" — the point is to not run an
-        unjudged action."""
+        """Auto Mode 的安全降级：能人工确认则询问，否则拒绝，绝不自动放行未判定动作。"""
         if self.confirm_fn:
             return {"action": "confirm", "message": message}
         return {"action": "deny", "message": f"{message} (headless — denied)"}
 
     def _child_permission_mode(self) -> str:
-        """Permission mode a spawned sub-agent inherits. plan and auto must carry
-        through — a sub-agent otherwise runs bypassPermissions, so in Auto Mode
-        the main model could launder a blocked action through
-        agent(prompt="git push origin main") and have the sub-agent run it
-        unclassified. Claude Code puts every sub-agent tool call through
-        canUseTool individually."""
+        """确定子 Agent 继承的权限模式。
+
+        plan 与 auto 必须向下传递；否则默认 bypassPermissions 会让主模型借子 Agent
+        绕过只读或分类器限制。其他模式允许子 Agent 独立执行已授权任务。
+        """
         if self.permission_mode == "plan":
             return "plan"
         if self.permission_mode == "auto":
             return "auto"
         return "bypassPermissions"
 
-    # ─── Session ──────────────────────────────────────────────
+    # ─── 会话持久化 ──────────────────────────────────────────
 
     def restore_session(self, data: dict) -> None:
         if data.get("anthropicMessages"):
@@ -952,7 +910,7 @@ class Agent:
         except Exception:
             pass
 
-    # ─── Autocompact ──────────────────────────────────────────
+    # ─── 自动压缩 ────────────────────────────────────────────
 
     async def _check_and_compact(self) -> None:
         if self.last_input_token_count > self.effective_window * 0.85:
@@ -967,10 +925,8 @@ class Agent:
         print_info("Conversation compacted.")
 
     async def _compact_anthropic(self) -> None:
-        # Invariant: caller must ensure the last message is a plain user-text
-        # message (not a tool_result). We slice it off below; if it were a
-        # tool_result, the preceding assistant's tool_use would be orphaned
-        # and the API would reject the summarize call.
+        # 不变量：最后一条必须是普通用户文本，不能是 tool_result。下面会暂时切掉它；
+        # 若切掉工具结果，前一条 assistant tool_use 将失去配对并导致 API 拒绝摘要请求。
         if len(self._anthropic_messages) < 4:
             return
         last_user_msg = self._anthropic_messages[-1]
@@ -993,10 +949,8 @@ class Agent:
         self.last_input_token_count = 0
 
     async def _compact_openai(self) -> None:
-        # Invariant: caller must ensure the last message is a plain user-text
-        # message (not a `tool` role result). Same reasoning as
-        # _compact_anthropic — slicing off a tool result would orphan the
-        # preceding assistant's tool_calls.
+        # 与 Anthropic 路径相同，最后一条必须是用户文本；切掉 role=tool 的结果会让
+        # 前一条 assistant tool_calls 失去配对。
         if len(self._openai_messages) < 5:
             return
         system_msg = self._openai_messages[0]
@@ -1019,7 +973,7 @@ class Agent:
             self._openai_messages.append(last_user_msg)
         self.last_input_token_count = 0
 
-    # ─── Multi-tier compression pipeline ──────────────────────
+    # ─── 多级上下文压缩流水线 ────────────────────────────────
 
     def _run_compression_pipeline(self) -> None:
         if self.use_openai:
@@ -1031,7 +985,7 @@ class Agent:
             self._snip_stale_results_anthropic()
             self._microcompact_anthropic()
 
-    # Tier 1: Budget tool results
+    # 第一级：按当前上下文利用率限制单个工具结果长度。
     def _budget_tool_results_anthropic(self) -> None:
         utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
         if utilization < 0.5:
@@ -1055,15 +1009,11 @@ class Agent:
                 keep = (budget - 80) // 2
                 msg["content"] = msg["content"][:keep] + f"\n\n[... budgeted: {len(msg['content']) - keep * 2} chars truncated ...]\n\n" + msg["content"][-keep:]
 
-    # Tier 2: Snip stale results
+    # 第二级：裁剪陈旧工具结果，同时保留最近结果和同文件的最新读取。
     def _snip_stale_results_anthropic(self) -> None:
-        # Cache-aware gate (mirrors Claude Code's cached-microcompact split):
-        # while the prompt cache is still hot, rewriting an old tool_result in
-        # place would invalidate the entire cached message prefix. Claude Code
-        # prunes hot caches via a cache_edits API call unavailable on the public
-        # API, so we leave the hot prefix alone — UNTIL utilization is high
-        # enough (SNIP_HOT_OVERRIDE) that risking an overflow costs more than one
-        # cache rebuild. Below that we wait for the cache to go cold.
+        # 缓存仍热时原地改写旧 tool_result 会使整段前缀失效。公共 API 没有
+        # cache_edits，因此低利用率时等待缓存变冷；超过 SNIP_HOT_OVERRIDE 后，
+        # 上下文溢出的风险高于重建一次缓存，才强制裁剪。
         utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
         cache_hot = self.last_api_call_time > 0 and (time.time() - self.last_api_call_time) < MICROCOMPACT_IDLE_S
         if cache_hot and utilization < SNIP_HOT_OVERRIDE:
@@ -1105,9 +1055,7 @@ class Agent:
             self._anthropic_messages[r["mi"]]["content"][r["bi"]]["content"] = SNIP_PLACEHOLDER
 
     def _snip_stale_results_openai(self) -> None:
-        # Cache-aware gate — see _snip_stale_results_anthropic. OpenAI-compatible
-        # providers cache prefixes automatically, so the same "don't rewrite a
-        # hot prefix (unless utilization is high)" rule applies.
+        # OpenAI 兼容供应商通常自动缓存前缀，同样遵守“缓存热且利用率不高时不改写”。
         utilization = self.last_input_token_count / self.effective_window if self.effective_window else 0
         cache_hot = self.last_api_call_time > 0 and (time.time() - self.last_api_call_time) < MICROCOMPACT_IDLE_S
         if cache_hot and utilization < SNIP_HOT_OVERRIDE:
@@ -1124,7 +1072,7 @@ class Agent:
         for i in range(snip_count):
             self._openai_messages[tool_msgs[i]]["content"] = SNIP_PLACEHOLDER
 
-    # Tier 3: Microcompact
+    # 第三级：缓存空闲足够久后清空旧结果，只保留最近若干条。
     def _microcompact_anthropic(self) -> None:
         if not self.last_api_call_time or (time.time() - self.last_api_call_time) < MICROCOMPACT_IDLE_S:
             return
@@ -1160,19 +1108,17 @@ class Agent:
                     return {"name": block["name"], "input": block.get("input", {})}
         return None
 
-    # ─── Large result persistence ─────────────────────────────────
-    # When a tool result exceeds 30 KB, write it to disk and replace the
-    # context entry with a short preview + file path.  The model can use
-    # read_file to retrieve the full output later — no information is lost.
+    # ─── 大结果持久化 ────────────────────────────────────────
+    # 工具结果超过 30 KB 时先完整落盘，再用预览和文件路径替换上下文内容；
+    # 模型仍可通过 read_file 取回全文。
 
     def _persist_large_result(self, tool_name: str, result: str) -> str:
-        THRESHOLD = 30 * 1024  # 30 KB
+        THRESHOLD = 30 * 1024  # 与上下文预览策略约定的落盘阈值。
         if len(result.encode()) <= THRESHOLD:
             return result
         d = Path.home() / ".lion-code" / "tool-results"
         d.mkdir(parents=True, exist_ok=True)
-        # uuid suffix: parallel tools can persist in the same millisecond —
-        # a timestamp-only name would let the second write clobber the first.
+        # 并行工具可能在同一毫秒落盘，UUID 后缀可防止仅用时间戳造成相互覆盖。
         filename = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}-{tool_name}.txt"
         filepath = d / filename
         filepath.write_text(result, encoding="utf-8")
@@ -1181,9 +1127,8 @@ class Agent:
         preview = "\n".join(lines[:200])
         size_kb = len(result.encode()) / 1024
 
-        # Truncate AFTER persisting: the full result is already safe on disk,
-        # so this only guards against pathological previews (e.g. a single
-        # multi-hundred-KB line). Order matters — see issue #6.
+        # 必须先持久化再截断；此处截断只防御单行数百 KB 等异常预览，不能影响完整数据
+        # 落盘。顺序要求见 issue #6。
         return _truncate_result(
             f"[Result too large ({size_kb:.1f} KB, {len(lines)} lines). "
             f"Full output saved to {filepath}. "
@@ -1191,7 +1136,7 @@ class Agent:
             f"Preview (first 200 lines):\n{preview}"
         )
 
-    # ─── Execute tool (handles agent/skill/plan mode internally) ─────
+    # ─── 工具路由（含 Agent、Skill 与 Plan 内部工具）────────
 
     async def _execute_tool_call(self, name: str, inp: dict) -> str:
         if name in ("enter_plan_mode", "exit_plan_mode"):
@@ -1201,18 +1146,17 @@ class Agent:
         if name == "skill":
             return await self._execute_skill_tool(inp)
         if name == "schedule_wakeup":
-            # Only the internal dynamic-loop driver may route here; outside a
-            # dynamic loop the tool isn't exposed, and this guard keeps a stray
-            # call (or a same-named external tool) from reaching the executor.
+            # 只有动态 loop 驱动器可进入此分支；额外守卫阻止游离调用或同名外部工具
+            # 误达内部执行器。
             if not self.schedule_wakeup_enabled:
                 return "schedule_wakeup is only available during /loop dynamic mode."
             return self._execute_schedule_wakeup(inp)
-        # Route MCP tool calls to the MCP manager
+        # MCP 前缀工具交给连接管理器解析 Server 与实际工具名。
         if self._mcp_manager.is_mcp_tool(name):
             return await self._mcp_manager.call_tool(name, inp)
         return await execute_tool(name, inp, self._read_file_state)
 
-    # ─── Skill fork mode ─────────────────────────────────────
+    # ─── Skill fork 模式 ─────────────────────────────────────
 
     async def _execute_skill_tool(self, inp: dict) -> str:
         from .skills import execute_skill
@@ -1221,8 +1165,7 @@ class Agent:
             return f"Unknown skill: {inp.get('skill_name', '')}"
 
         if result["context"] == "fork":
-            # Never pass schedule_wakeup down — it's a driver-internal tool scoped
-            # to this agent's dynamic loop, not something a forked skill inherits.
+            # schedule_wakeup 只属于当前 Agent 的动态 loop 驱动器，fork Skill 不得继承。
             tools = [
                 t for t in (
                     [t for t in self.tools if t["name"] in result["allowed_tools"]]
@@ -1252,7 +1195,7 @@ class Agent:
 
         return f'[Skill "{inp.get("skill_name", "")}" activated]\n\n{result["prompt"]}'
 
-    # ─── Plan mode helpers ──────────────────────────────────────
+    # ─── Plan 模式辅助 ───────────────────────────────────────
 
     def _generate_plan_file_path(self) -> str:
         d = Path.home() / ".claude" / "plans"
@@ -1300,7 +1243,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             if self._plan_file_path and Path(self._plan_file_path).exists():
                 plan_content = Path(self._plan_file_path).read_text()
 
-            # Interactive approval flow
+            # 主 Agent 有审批回调时进入交互式选择流程。
             if self._plan_approval_fn:
                 result = await self._plan_approval_fn(plan_content)
                 choice = result.get("choice", "manual-execute")
@@ -1313,15 +1256,15 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                         f"Please revise your plan based on this feedback. When done, call exit_plan_mode again."
                     )
 
-                # User approved — determine target mode
+                # 根据用户选择确定退出 Plan 后的权限模式。
                 if choice == "clear-and-execute":
                     target_mode = "acceptEdits"
                 elif choice == "execute":
                     target_mode = "acceptEdits"
-                else:  # manual-execute
+                else:  # 手动审批编辑时恢复进入 Plan 前的模式。
                     target_mode = self._pre_plan_mode or "default"
 
-                # Exit plan mode
+                # 先完整退出 Plan，再把批准后的计划交回模型执行。
                 self.permission_mode = target_mode
                 self._pre_plan_mode = None
                 saved_plan_path = self._plan_file_path
@@ -1348,7 +1291,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                     f"Proceed with implementation."
                 )
 
-            # Fallback: no approval function (e.g. sub-agents)
+            # 子 Agent 等无审批回调场景直接恢复原权限模式，不伪造用户批准。
             self.permission_mode = self._pre_plan_mode or "default"
             self._pre_plan_mode = None
             self._plan_file_path = None
@@ -1361,7 +1304,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
         return f"Unknown plan mode tool: {name}"
 
     def _clear_history_keep_system(self) -> None:
-        """Clear history but keep system prompt (used for clear-context plan approval)."""
+        """清空对话但保留系统提示词，供 Plan 审批后的全新执行上下文使用。"""
         self._anthropic_messages = []
         self._openai_messages = []
         if self.use_openai:
@@ -1395,17 +1338,15 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             print_sub_agent_end(agent_type, description)
             return f"Sub-agent error: {e}"
 
-    # ─── Anthropic backend ───────────────────────────────────────
+    # ─── 外部资源与 Memory 预取 ──────────────────────────────
 
     async def close(self) -> None:
-        """Release external resources (MCP subprocesses) for a clean exit —
-        see issue #8."""
+        """释放 MCP 子进程等外部资源，确保进程正常退出（issue #8）。"""
         if self._mcp_initialized:
             await self._mcp_manager.disconnect_all()
 
     def _consume_memory_prefetch_if_ready(self, messages: list) -> None:
-        """Inject recalled memories if the prefetch settled (non-blocking).
-        Appends to the last user message to keep user/assistant alternation."""
+        """非阻塞消费已完成的 Memory 预取，并追加到末条用户消息以保持 role 交替。"""
         pf = self._memory_prefetch
         if not (pf and pf.settled and not pf.consumed):
             return
@@ -1428,12 +1369,10 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 self._already_surfaced_memories.add(m.path)
                 self._session_memory_bytes += len(m.content.encode())
         except Exception:
-            pass  # prefetch errors already logged
+            pass  # 预取层已记录错误，此处不能让召回失败中断主对话。
 
     def _start_memory_prefetch_for_turn(self, user_message: str, messages: list) -> None:
-        """Drain any carry-over prefetch from the previous turn (a recall
-        that settled after the last API call would otherwise be dropped —
-        issue #7), then start a fresh prefetch for this query."""
+        """先消费上一轮延迟完成的召回，再为当前查询启动新预取（issue #7）。"""
         self._consume_memory_prefetch_if_ready(messages)
         if self.is_sub_agent:
             return
@@ -1447,12 +1386,11 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             )
 
     def _push_anthropic_user_message(self, content: str) -> None:
-        """Push a user message, prepending the CLAUDE.md/date <system-reminder>
-        when it is the first user message of a (possibly just-cleared) context —
-        Claude Code's prependUserContext, kept out of the cached system prompt.
-        Embedded in the user message rather than a standalone message to preserve
-        user/assistant alternation. Also used by the plan clear-and-execute path,
-        which rebuilds history from empty."""
+        """追加 Anthropic 用户消息，并在新上下文首条消息前置项目 reminder。
+
+        reminder 留在缓存系统提示词之外，并嵌入同一 user 消息以保持 role 交替；
+        Plan 的 clear-and-execute 重建空历史时也走此入口。
+        """
         if not self._anthropic_messages and self._user_context_reminder:
             self._anthropic_messages.append({
                 "role": "user",
@@ -1471,14 +1409,15 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
         else:
             self._openai_messages.append({"role": "user", "content": content})
 
+    # ─── Anthropic 后端 ──────────────────────────────────────
+
     async def _chat_anthropic(self, user_message: str) -> None:
         self._push_anthropic_user_message(user_message)
-        # Auto-compact at turn boundary only — the last message is now plain
-        # user text, so the slice in _compact_anthropic won't sever a
-        # tool_use ↔ tool_result pair from the previous turn's tool execution.
+        # 只在轮次边界自动压缩：此时末条是普通用户文本，不会切断上一轮的
+        # tool_use ↔ tool_result 配对。
         await self._check_and_compact()
 
-        # Memory prefetch: drain carry-over, then start fresh (issue #7)
+        # 先消费上一轮延迟结果，再启动当前轮 Memory 预取（issue #7）。
         self._start_memory_prefetch_for_turn(user_message, self._anthropic_messages)
 
         while True:
@@ -1487,22 +1426,19 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
             self._run_compression_pipeline()
 
-            # Consume memory prefetch if settled (non-blocking poll, zero-wait)
+            # 零等待轮询预取结果，不能为 Memory 阻塞主模型调用。
             self._consume_memory_prefetch_if_ready(self._anthropic_messages)
 
             if not self.is_sub_agent:
                 start_spinner()
 
-            # ── Streaming tool execution ──────────────────────────────
-            # As each tool_use content block completes during streaming, check
-            # if it's concurrency-safe and auto-allowed. If so, start execution
-            # immediately — the tool runs while the model still generates.
+            # 流式响应中每完成一个 tool_use block，就检查其是否可并发且已自动放行；
+            # 满足条件便立即启动，使工具执行与模型后续生成重叠。
             early_executions: dict[str, asyncio.Task] = {}
 
             def _on_tool_block(block: dict):
-                # In Auto Mode, only fast-path (classifier-exempt) tools may start
-                # early — otherwise a concurrency-safe-but-classified tool (e.g.
-                # web_fetch) would run before the classifier ever sees it.
+                # Auto Mode 只能提前启动免分类工具，否则 web_fetch 等虽可并发的动作
+                # 会在分类器审查前产生副作用。
                 if self.permission_mode == "auto" and block["name"] not in AUTO_MODE_FAST_PATH_TOOLS:
                     return
                 if block["name"] in CONCURRENCY_SAFE_TOOLS:
@@ -1517,18 +1453,14 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 stop_spinner()
 
             self.last_api_call_time = time.time()
-            # Anthropic reports cached tokens separately: `input_tokens` counts
-            # only the uncached prefix, while cache_read/cache_creation are
-            # billed at 0.1x/1.25x. Track them apart for cost.
+            # Anthropic 的 input_tokens 不含缓存读取与写入量，三者费率不同，必须分开累计。
             cache_read = getattr(response.usage, "cache_read_input_tokens", 0) or 0
             cache_creation = getattr(response.usage, "cache_creation_input_tokens", 0) or 0
             self.total_input_tokens += response.usage.input_tokens
             self.total_cache_read_tokens += cache_read
             self.total_cache_creation_tokens += cache_creation
             self.total_output_tokens += response.usage.output_tokens
-            # Estimate next-turn context size for the compaction gauge: the full
-            # prompt we just sent (input + cache_read + cache_creation) plus the
-            # output we just generated, which becomes part of the next request.
+            # 下一轮上下文估算包含本次完整 prompt 与刚生成、将进入下一请求的输出。
             self.last_input_token_count = (
                 response.usage.input_tokens + cache_read + cache_creation + response.usage.output_tokens
             )
@@ -1549,9 +1481,8 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             budget = self._check_budget()
             if budget["exceeded"]:
                 print_info(f"Budget exceeded: {budget['reason']}")
-                # Every tool_use needs a paired tool_result or the message
-                # history is invalid for the next API call. Pair each pending
-                # call with a refusal instead of silently dropping it.
+                # 每个 tool_use 都必须有 tool_result 配对；预算超限时写入拒绝结果，
+                # 不能静默丢弃并留下无效消息历史。
                 for task in early_executions.values():
                     task.cancel()
                 self._anthropic_messages.append({"role": "user", "content": [
@@ -1561,8 +1492,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 ]})
                 break
 
-            # Process tools: early-started ones (from streaming) just await
-            # their result; others go through permission check + execution.
+            # 流式阶段已启动的工具只需等待，其余工具再走权限检查和执行。
             tool_results: list[dict] = []
             context_break = False
             for tu in tool_uses:
@@ -1571,7 +1501,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 inp = dict(tu.input) if hasattr(tu.input, 'items') else tu.input
                 print_tool_call(tu.name, inp)
 
-                # Was this tool already started during streaming?
+                # 先复用流式阶段已经启动的任务，避免重复执行。
                 early_task = early_executions.get(tu.id)
                 if early_task:
                     raw = await early_task
@@ -1580,8 +1510,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                     tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": res})
                     continue
 
-                # Permission check for tools not started early. Auto Mode routes
-                # through the transcript classifier; other modes use static rules.
+                # 未提前启动的工具在此判权；Auto Mode 走 transcript 分类器，其余走静态规则。
                 if self.permission_mode == "auto":
                     perm = await self._classify_tool_call(tu.name, inp)
                 else:
@@ -1591,9 +1520,8 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                     tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": f"Action denied: {perm.get('message', '')}"})
                     continue
                 if perm["action"] == "confirm" and perm.get("message"):
-                    # Auto Mode confirms carry a reason, not a path — never cache
-                    # them, or one approval would whitelist every later action
-                    # with the same reason.
+                    # Auto Mode 的 confirm 内容是原因而非具体路径，不能缓存；否则一次批准
+                    # 会错误放行所有具有相同原因的后续动作。
                     cacheable = self.permission_mode != "auto"
                     if not cacheable or perm["message"] not in self._confirmed_paths:
                         confirmed = await self._confirm_dangerous(perm["message"])
@@ -1609,8 +1537,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
                 if self._context_cleared:
                     self._context_cleared = False
-                    # History was just cleared — route through the helper so the
-                    # rebuilt context's first user message carries the reminder.
+                    # Plan 审批刚清空历史时，通过统一入口重建首条用户消息并补回 reminder。
                     self._push_anthropic_user_message(res)
                     context_break = True
                     break
@@ -1622,19 +1549,19 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
     @staticmethod
     def _block_to_dict(block) -> dict:
-        """Convert an Anthropic content block to a plain dict for storage."""
+        """把 Anthropic SDK content block 转为可序列化的普通字典。"""
         if block.type == "text":
             return {"type": "text", "text": block.text}
         if block.type == "tool_use":
             return {"type": "tool_use", "id": block.id, "name": block.name, "input": dict(block.input) if hasattr(block.input, 'items') else block.input}
-        # Fallback
+        # 未识别 block 至少保留类型，避免序列化 SDK 私有对象失败。
         return {"type": block.type}
 
     async def _call_anthropic_stream(self, on_tool_block_complete=None):
-        """Stream an Anthropic API call. When a tool_use content block finishes
-        during streaming, on_tool_block_complete fires immediately so the caller
-        can start execution before the full response arrives (streaming tool
-        execution -- inspired by Claude Code's content_block_stop streaming pattern)."""
+        """流式调用 Anthropic，并在 tool_use block 完成时立即触发回调。
+
+        调用方因此可在整条响应结束前启动并发安全的工具。
+        """
         async def _do():
             max_output = _get_max_output_tokens(self.model)
             create_params: dict[str, Any] = {
@@ -1642,8 +1569,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 "max_tokens": max_output if self._thinking_mode != "disabled" else 16384,
                 "system": self._build_anthropic_system(),
                 "tools": get_active_tool_definitions(self.tools),
-                # Rolling message-array cache breakpoint, applied to a copy so
-                # the persistent history stays free of cache_control metadata.
+                # 滚动缓存边界只施加在消息副本，持久历史不混入 cache_control 元数据。
                 "messages": self._with_cache_breakpoints(self._anthropic_messages),
             }
 
@@ -1651,7 +1577,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 create_params["thinking"] = {"type": "enabled", "budget_tokens": max_output - 1}
 
             first_text = True
-            # Track in-flight tool_use blocks by index for streaming execution
+            # 按 block index 累积流式 JSON，完成后才能安全解析并启动工具。
             tool_blocks_by_index: dict[int, dict] = {}
 
             async with self._anthropic_client.messages.stream(**create_params) as stream:
@@ -1700,22 +1626,20 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
                 final_message = await stream.get_final_message()
 
-            # Filter out thinking blocks
+            # thinking 只用于当轮展示，不写回历史，避免不稳定内容降低缓存命中率。
             final_message.content = [b for b in final_message.content if b.type != "thinking"]
             return final_message
 
         return await _with_retry(_do)
 
-    # ─── OpenAI-compatible backend ───────────────────────────────
+    # ─── OpenAI 兼容后端 ─────────────────────────────────────
 
     async def _chat_openai(self, user_message: str) -> None:
         self._push_openai_user_message(user_message)
-        # Auto-compact at turn boundary only — see _chat_anthropic for rationale.
-        # The last message is now plain user text, so the slice in
-        # _compact_openai won't orphan a tool_calls / tool message pair.
+        # 同 Anthropic 路径，只在末条为用户文本的轮次边界压缩，避免拆散工具配对。
         await self._check_and_compact()
 
-        # Memory prefetch: drain carry-over, then start fresh (issue #7)
+        # 先消费上一轮延迟结果，再启动当前轮 Memory 预取（issue #7）。
         self._start_memory_prefetch_for_turn(user_message, self._openai_messages)
 
         while True:
@@ -1724,7 +1648,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
             self._run_compression_pipeline()
 
-            # Consume memory prefetch if settled (non-blocking poll, zero-wait)
+            # 零等待轮询预取结果，不为召回阻塞主流程。
             self._consume_memory_prefetch_if_ready(self._openai_messages)
 
             if not self.is_sub_agent:
@@ -1738,21 +1662,16 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             self.last_api_call_time = time.time()
 
             if response.get("usage"):
-                # OpenAI-compatible providers cache prefixes automatically; the
-                # cached portion is included in prompt_tokens, so split it out to
-                # avoid double-counting. Clamp to [0, prompt_tokens] since
-                # compatible gateways don't guarantee the field. NOTE: priced at
-                # Anthropic's 0.1x for simplicity; actual cached rates vary by
-                # provider (OpenAI ~0.5x, gateways vary), so the estimate may be
-                # off in either direction.
+                # 兼容供应商通常把 cached_tokens 包含在 prompt_tokens 中，需拆出以免
+                # 重复计费；网关不保证字段合法，故限制在 [0, prompt_tokens]。缓存价格
+                # 暂按 Anthropic 0.1 倍估算，实际供应商账单可能不同。
                 prompt = response["usage"]["prompt_tokens"] or 0
                 cached_oa = min(max(response["usage"].get("cached_tokens", 0) or 0, 0), prompt)
                 completion = response["usage"]["completion_tokens"]
                 self.total_input_tokens += prompt - cached_oa
                 self.total_cache_read_tokens += cached_oa
                 self.total_output_tokens += completion
-                # Estimate next-turn context size: this prompt + the output we
-                # just generated (which becomes part of the next request).
+                # 下一轮上下文估算为当前 prompt 加上会进入后续请求的本次输出。
                 self.last_input_token_count = prompt + completion
 
             choice = response.get("choices", [{}])[0] if response.get("choices") else {}
@@ -1770,8 +1689,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             budget = self._check_budget()
             if budget["exceeded"]:
                 print_info(f"Budget exceeded: {budget['reason']}")
-                # Same pairing requirement as the Anthropic path: every
-                # tool_call needs a role="tool" response.
+                # 与 Anthropic 相同，每个 tool_call 都必须有 role=tool 的配对响应。
                 for tc in tool_calls:
                     if tc.get("id"):
                         self._openai_messages.append({
@@ -1781,7 +1699,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                         })
                 break
 
-            # Phase 1: Parse & permission-check (serial)
+            # 第一阶段串行解析并判权，确保任何工具都不会在授权前启动。
             oai_checked: list[dict] = []
             for tc in tool_calls:
                 if self._aborted:
@@ -1805,9 +1723,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                     oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False, "result": f"Action denied: {perm.get('message', '')}"})
                     continue
                 if perm["action"] == "confirm" and perm.get("message"):
-                    # Auto Mode confirms carry a reason, not a path — never cache
-                    # them, or one approval would whitelist every later action
-                    # with the same reason.
+                    # Auto Mode 的确认文本是原因而非具体资源，不能缓存为后续白名单。
                     cacheable = self.permission_mode != "auto"
                     if not cacheable or perm["message"] not in self._confirmed_paths:
                         confirmed = await self._confirm_dangerous(perm["message"])
@@ -1818,7 +1734,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                             self._confirmed_paths.add(perm["message"])
                 oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": True})
 
-            # Phase 2: Group & execute (parallel for consecutive safe tools)
+            # 第二阶段按顺序分批执行；只有连续的无副作用工具可并行。
             oai_batches: list[dict] = []
             for ct in oai_checked:
                 safe = ct["allowed"] and ct["fn"] in CONCURRENCY_SAFE_TOOLS
@@ -1853,8 +1769,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
                         if self._context_cleared:
                             self._context_cleared = False
-                            # History was just cleared — route through the helper
-                            # so the first user message carries the reminder.
+                            # 历史刚被清空，通过统一入口给新上下文首条消息补回 reminder。
                             self._push_openai_user_message(res)
                             oai_context_break = True
                             break
@@ -1937,13 +1852,13 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
         return await _with_retry(_do)
 
-    # ─── Shared ──────────────────────────────────────────────────
+    # ─── 后端共用交互 ────────────────────────────────────────
 
     async def _confirm_dangerous(self, command: str) -> bool:
         print_confirmation(command)
         if self.confirm_fn:
             return await self.confirm_fn(command)
-        # Fallback: blocking input
+        # 无异步回调时退回阻塞式终端输入，仅用于直接嵌入 Agent 的场景。
         try:
             answer = input("  Allow? (y/n): ")
             return answer.lower().startswith("y")

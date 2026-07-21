@@ -1,6 +1,7 @@
-"""Tool definitions and execution — 10 tools with 5 permission modes.
-Tool system inspired by Claude Code's published design: read_file, write_file, edit_file, list_files,
-grep_search, run_shell, skill, enter/exit_plan_mode, agent."""
+"""工具定义与执行：提供文件、搜索、Shell、Skill、Plan 和子 Agent 等工具。
+
+权限与执行分层参考 Claude Code 的公开设计，所有工具共享同一权限判定入口。
+"""
 
 from __future__ import annotations
 
@@ -15,23 +16,23 @@ from pathlib import Path
 from .memory import get_memory_dir
 from .frontmatter import parse_frontmatter
 
-# ─── Permission modes ──────────────────────────────────────
+# ─── 权限模式 ───────────────────────────────────────────────
 
-PermissionMode = str  # "default" | "plan" | "acceptEdits" | "bypassPermissions" | "dontAsk" | "auto"
+PermissionMode = str  # 可用值由 CLI 的权限模式选项约束。
 
 READ_TOOLS = {"read_file", "list_files", "grep_search", "web_fetch"}
 EDIT_TOOLS = {"write_file", "edit_file"}
 
-# Concurrency-safe tools can run in parallel (read-only, no side effects)
+# 只有无副作用的只读工具可并行，避免多个工具相互观察到中间状态。
 CONCURRENCY_SAFE_TOOLS = {"read_file", "list_files", "grep_search", "web_fetch"}
 
 IS_WIN = sys.platform == "win32"
 
-# ─── Type alias ──────────────────────────────────────────────
+# ─── 类型别名 ───────────────────────────────────────────────
 
-ToolDef = dict  # Anthropic tool schema dict
+ToolDef = dict  # Anthropic 工具 schema；OpenAI 格式在 Agent 层转换。
 
-# ─── Tool definitions ───────────────────────────────────────
+# ─── 工具定义 ───────────────────────────────────────────────
 
 tool_definitions: list[ToolDef] = [
     {
@@ -156,7 +157,7 @@ tool_definitions: list[ToolDef] = [
             "required": ["description", "prompt"],
         },
     },
-    # ─── Tool search (deferred tool loader) ─────────────────────
+    # 延迟工具只在模型明确搜索后激活，减少常规请求的 schema Token 占用。
     {
         "name": "tool_search",
         "description": "Search for available tools by name or keyword. Returns full schema definitions for matching deferred tools so you can use them.",
@@ -170,7 +171,7 @@ tool_definitions: list[ToolDef] = [
     },
 ]
 
-# ─── Deferred tool activation ───────────────────────────────
+# ─── 延迟工具激活 ───────────────────────────────────────────
 
 _activated_tools: set[str] = set()
 
@@ -180,8 +181,7 @@ def reset_activated_tools() -> None:
 
 
 def get_active_tool_definitions(all_tools: list[ToolDef] | None = None) -> list[ToolDef]:
-    """Return tool definitions, excluding deferred tools that haven't been activated.
-    Strips the 'deferred' key so it's not sent to the API."""
+    """返回当前已启用的工具，并移除不属于 API schema 的 `deferred` 字段。"""
     tools = all_tools if all_tools is not None else tool_definitions
     return [
         {k: v for k, v in t.items() if k != "deferred"}
@@ -191,19 +191,18 @@ def get_active_tool_definitions(all_tools: list[ToolDef] | None = None) -> list[
 
 
 def get_deferred_tool_names(all_tools: list[ToolDef] | None = None) -> list[str]:
-    """Return names of deferred tools that haven't been activated yet."""
+    """返回尚未激活的延迟工具名称。"""
     tools = all_tools if all_tools is not None else tool_definitions
     return [t["name"] for t in tools if t.get("deferred") and t["name"] not in _activated_tools]
 
 
-# ─── Tool execution ─────────────────────────────────────────
+# ─── 工具执行 ───────────────────────────────────────────────
 
 
 def _read_file(inp: dict) -> str:
     try:
-        # errors="replace": undecodable bytes become U+FFFD instead of
-        # raising — same behavior as Node's readFileSync("utf-8") in the TS
-        # version, so both implementations return content for mixed files.
+        # 解码失败时替换为 U+FFFD，而不是让混合编码文件中断 Agent 主循环；
+        # 这也与 TypeScript 版本的 readFileSync("utf-8") 行为保持一致。
         content = Path(inp["file_path"]).read_text(encoding="utf-8", errors="replace")
         lines = content.split("\n")
         numbered = "\n".join(f"{i+1:4d} | {line}" for i, line in enumerate(lines))
@@ -253,7 +252,7 @@ def _auto_update_memory_index(file_path: str) -> None:
         pass
 
 
-# ─── Edit helpers: quote normalization + diff ───────────────
+# ─── 编辑辅助：引号归一化与 diff ────────────────────────────
 
 
 def _normalize_quotes(s: str) -> str:
@@ -319,14 +318,11 @@ def _list_files(inp: dict) -> str:
         for p in base.glob(pattern):
             if p.is_file():
                 rel = str(p.relative_to(base) if base != Path(".") else p)
-                # Skip node_modules / hidden components by exact path part —
-                # a substring test would also drop a file merely *named*
-                # like "my_node_modules_note.txt". Skipping dotfiles matches
-                # the TS glob behavior (dot:false).
+                # 按路径段精确排除 node_modules 和隐藏目录，避免误伤名称中仅包含
+                # `node_modules` 的普通文件；忽略 dotfile 与 TS 的 `dot:false` 一致。
                 if any(part == "node_modules" or part.startswith(".") for part in Path(rel).parts):
                     continue
-                # Keep at most 200 entries, but keep counting so the model
-                # knows how many matches were omitted (matches TS behavior).
+                # 返回值最多保留 200 项，但继续计数，让模型知道结果是否被截断。
                 if len(files) < 200:
                     files.append(rel)
                 else:
@@ -346,7 +342,7 @@ def _grep_search(inp: dict) -> str:
     path = inp.get("path") or "."
     include = inp.get("include")
 
-    # Try system grep first (Linux/macOS)
+    # Linux/macOS 优先使用系统 grep；Windows 或执行失败时走纯 Python 实现。
     if not IS_WIN:
         try:
             args = ["grep", "--line-number", "--color=never", "-r"]
@@ -364,11 +360,11 @@ def _grep_search(inp: dict) -> str:
                 if len(lines) > 100:
                     output += f"\n... and {len(lines) - 100} more matches"
                 return output
-            # Non-zero exit (not 1) — fall through to Python fallback
+            # 退出码 1 代表无匹配；其他非零状态交给 Python 路径重试。
         except Exception:
-            pass  # Fall through to Python fallback
+            pass  # 系统 grep 不可用时继续使用跨平台实现。
 
-    # Pure Python fallback (Windows, or system grep unavailable)
+    # 纯 Python 实现保证 Windows 和缺少 grep 的环境仍可工作。
     return _grep_python(pattern, path, include)
 
 
@@ -376,9 +372,7 @@ def _grep_python(pattern: str, directory: str, include: str | None) -> str:
     try:
         regex = re.compile(pattern)
     except re.error as e:
-        # A model-supplied bad regex must come back as a tool error string,
-        # not crash the agent loop (system grep exit 2 also falls through
-        # to here with the same broken pattern).
+        # 模型生成的非法正则应成为工具错误文本，不能让异常逃逸并终止 Agent 主循环。
         return f"Error: invalid regex pattern: {e}"
     include_pattern = include
     matches: list[str] = []
@@ -403,8 +397,7 @@ def _grep_python(pattern: str, directory: str, include: str | None) -> str:
                 text = Path(full).read_text(errors="replace")
                 for i, line in enumerate(text.split("\n")):
                     if regex.search(line):
-                        # Show at most 100 matches, but keep counting so the
-                        # model knows how many were omitted.
+                        # 最多展示 100 个匹配，同时保留遗漏数量供模型判断完整性。
                         if len(matches) < 100:
                             matches.append(f"{full}:{i+1}:{line}")
                         else:
@@ -450,9 +443,8 @@ def _web_fetch(inp: dict) -> str:
 
     url = inp.get("url", "")
     max_length = inp.get("max_length", 50000)
-    # urllib happily opens file:// and other schemes — that would turn a
-    # "web" fetch into local file disclosure. http(s) only (TS fetch already
-    # rejects non-http schemes).
+    # urllib 默认允许 file:// 等协议，会把“网页读取”变成本地文件泄露入口；
+    # 因此边界处只接受 http(s)，并与 TS 实现保持一致。
     if not url.lower().startswith(("http://", "https://")):
         return "Error: only http(s) URLs are supported"
     req = urllib.request.Request(url, headers={"User-Agent": "lion-code/1.0"})
@@ -483,7 +475,7 @@ def _web_fetch(inp: dict) -> str:
     return text or "(empty response)"
 
 
-# ─── Dangerous command patterns ─────────────────────────────
+# ─── 危险命令模式 ───────────────────────────────────────────
 
 DANGEROUS_PATTERNS = [
     re.compile(r"\brm\s"),
@@ -509,7 +501,7 @@ def is_dangerous(command: str) -> bool:
     return any(p.search(command) for p in DANGEROUS_PATTERNS)
 
 
-# ─── Permission rules (.claude/settings.json) ───────────────
+# ─── 权限规则（.claude/settings.json）───────────────────────
 
 
 def _parse_rule(rule: str) -> dict:
@@ -592,16 +584,14 @@ def check_permission(
     mode: str = "default",
     plan_file_path: str | None = None,
 ) -> dict:
-    """Returns {"action": "allow"|"deny"|"confirm", "message": ...}"""
-    # Deny rules always win — even bypassPermissions (--yolo) is constrained
-    # by deny rules (docs/06-permissions.md), so check them before any mode
-    # shortcut.
+    """返回 allow、deny 或 confirm；显式 deny 与 Plan 只读约束优先级最高。"""
+    # deny 是权限硬边界，即使 bypassPermissions（--yolo）也不能越过，
+    # 所以必须在所有模式快捷路径之前检查。
     rule_result = _check_permission_rules(tool_name, inp)
     if rule_result == "deny":
         return {"action": "deny", "message": f"Denied by permission rule for {tool_name}"}
 
-    # Plan mode's read-only contract beats allow rules and bypass: only the
-    # plan file itself is writable, and shell stays blocked (docs/10).
+    # Plan 模式的只读契约高于 allow 和 bypass：仅计划文件可写，Shell 始终禁用。
     if mode == "plan":
         if tool_name in EDIT_TOOLS:
             file_path = inp.get("file_path") or inp.get("path")
@@ -647,7 +637,7 @@ def check_permission(
     return {"action": "allow"}
 
 
-# ─── Truncate long tool results ─────────────────────────────
+# ─── 长工具结果截断 ─────────────────────────────────────────
 
 MAX_RESULT_CHARS = 50000
 
@@ -663,14 +653,14 @@ def _truncate_result(result: str) -> str:
     )
 
 
-# ─── Execute a tool call ────────────────────────────────────
-# "agent" and "skill" tools are handled in agent.py to avoid circular deps.
+# ─── 工具调用入口 ───────────────────────────────────────────
+# `agent` 和 `skill` 由 agent.py 处理，避免执行层产生循环依赖。
 
 
 async def execute_tool(
     name: str, inp: dict, read_file_state: dict[str, float] | None = None
 ) -> str:
-    # ─── read-before-edit + mtime freshness checks ───────────
+    # ─── 先读后写与 mtime 新鲜度检查 ────────────────────────
     if name == "read_file":
         result = _read_file(inp)
         if read_file_state is not None and not result.startswith("Error"):
@@ -679,9 +669,8 @@ async def execute_tool(
                 read_file_state[abs_path] = os.path.getmtime(abs_path)
             except OSError:
                 pass
-        # Return the full result untruncated: the agent layer persists large
-        # results to disk first (persistLargeResult), then truncates as a
-        # safety net. Truncating here would destroy data before persistence.
+        # 此处必须返回完整结果：Agent 层会先把大结果持久化，再做上下文截断；
+        # 若执行层提前截断，落盘前就会永久丢失数据。
         return result
 
     if name in ("write_file", "edit_file") and read_file_state is not None:
@@ -694,7 +683,7 @@ async def execute_tool(
                 verb = "writing" if name == "write_file" else "editing"
                 return f"Warning: {inp['file_path']} was modified externally since your last read. Please read_file again before {verb}."
 
-    # tool_search: activate deferred tools and return their schemas
+    # tool_search 激活匹配的延迟工具，并把完整 schema 返回给模型。
     if name == "tool_search":
         query = (inp.get("query") or "").lower()
         deferred = [t for t in tool_definitions if t.get("deferred")]
@@ -724,7 +713,7 @@ async def execute_tool(
         return f"Unknown tool: {name}"
     result = handler(inp)
 
-    # Update mtime after successful write/edit
+    # 写入成功后刷新 mtime，保证同一 Agent 后续编辑不会被误判为外部修改。
     if name in ("write_file", "edit_file") and read_file_state is not None and not result.startswith("Error"):
         abs_path = str(Path(inp["file_path"]).resolve())
         try:

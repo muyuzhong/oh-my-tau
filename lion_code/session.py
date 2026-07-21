@@ -1,4 +1,4 @@
-"""Session management — JSON file persistence for conversation history."""
+"""会话管理：使用 JSON 文件持久化对话历史。"""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ def load_session(session_id: str) -> dict[str, Any] | None:
     try:
         return json.loads(path.read_text())
     except Exception:
+        # 损坏的历史会话不应阻止 CLI 启动，由调用方按“会话不存在”处理。
         return None
 
 
@@ -37,6 +38,7 @@ def list_sessions() -> list[dict[str, Any]]:
             if "metadata" in data:
                 results.append(data["metadata"])
         except Exception:
+            # 单个会话损坏时继续列出其余可恢复会话。
             pass
     return results
 

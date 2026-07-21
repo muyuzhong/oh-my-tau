@@ -1,4 +1,4 @@
-"""Terminal UI rendering — colored output, spinner, tool display."""
+"""终端界面渲染：彩色输出、等待动画及工具调用摘要。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from rich.console import Console
 
 console = Console(highlight=False)
 
-# ─── Basic output ──────────────────────────────────────────
+# ─── 基础输出 ───────────────────────────────────────────────
 
 
 def print_welcome() -> None:
@@ -82,7 +82,7 @@ def print_divider() -> None:
 
 
 def print_cost(input_tokens: int, output_tokens: int, cache_read: int = 0, cache_creation: int = 0) -> None:
-    # Cache read is billed 0.1x, cache write 1.25x (see agent _get_current_cost_usd).
+    # 与 Agent 的费用估算保持同一倍率，避免状态栏和预算检查显示不同金额。
     total = (
         (input_tokens / 1_000_000) * 3
         + (cache_read / 1_000_000) * 0.3
@@ -101,7 +101,7 @@ def print_info(msg: str) -> None:
     console.print(f"\n  [cyan]ℹ {msg}[/cyan]")
 
 
-# ─── Spinner ──────────────────────────────────────────────
+# ─── 等待动画 ───────────────────────────────────────────────
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
@@ -140,7 +140,7 @@ def stop_spinner() -> None:
     sys.stdout.flush()
 
 
-# ─── Plan approval display ──────────────────────────────────
+# ─── Plan 审批界面 ──────────────────────────────────────────
 
 
 def print_plan_for_approval(plan_content: str) -> None:
@@ -162,7 +162,7 @@ def print_plan_approval_options() -> None:
     console.print("    [white]4) No, keep planning[/white][dim] — provide feedback to revise[/dim]")
 
 
-# ─── Sub-agent display ──────────────────────────────────────
+# ─── 子 Agent 状态 ──────────────────────────────────────────
 
 
 def print_sub_agent_start(agent_type: str, description: str) -> None:
@@ -173,7 +173,7 @@ def print_sub_agent_end(agent_type: str, _description: str) -> None:
     console.print(f"  [magenta]└─ Sub-agent [{agent_type}] completed[/magenta]")
 
 
-# ─── Tool icons and summaries ───────────────────────────────
+# ─── 工具图标与摘要 ─────────────────────────────────────────
 
 _TOOL_ICONS = {
     "read_file": "📖",

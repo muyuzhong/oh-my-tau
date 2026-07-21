@@ -1,4 +1,4 @@
-"""System prompt construction — template embedded, variable interpolation, context gathering."""
+"""系统提示词构建：组合静态模板、变量插值和运行环境上下文。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from .skills import build_skill_descriptions
 from .subagent import build_agent_descriptions
 from .tools import get_deferred_tool_names
 
-# ─── System prompt template (embedded) ──────────────────────
+# ─── 内嵌的系统提示词模板 ───────────────────────────────────
 
 SYSTEM_PROMPT_TEMPLATE = """\
 You are Lion Code, a lightweight coding assistant CLI.
@@ -89,8 +89,8 @@ If you can say it in one sentence, don't use three. Prefer short, direct sentenc
 
 import re as _re
 
-# ─── @include resolution ─────────────────────────────────────
-# Resolves @./path, @~/path, @/path references in CLAUDE.md files.
+# ─── @include 解析 ───────────────────────────────────────────
+# 支持 CLAUDE.md 中的 @./path、@~/path 与 @/path 引用；深度和去重限制用于阻断循环包含。
 
 _INCLUDE_RE = _re.compile(r"^@(\./[^\s]+|~/[^\s]+|/[^\s]+)$", _re.MULTILINE)
 _MAX_INCLUDE_DEPTH = 5
@@ -132,7 +132,7 @@ def _resolve_includes(
 
 
 def _load_rules_dir(directory: Path) -> str:
-    """Load all .md files from .claude/rules/ directory."""
+    """按文件名顺序加载 `.claude/rules/` 下的 Markdown 规则。"""
     rules_dir = directory / ".claude" / "rules"
     if not rules_dir.is_dir():
         return ""
@@ -154,7 +154,7 @@ def _load_rules_dir(directory: Path) -> str:
 
 
 def load_claude_md() -> str:
-    """Walk up from cwd collecting all CLAUDE.md files, resolving @includes."""
+    """从 cwd 向上收集 CLAUDE.md，并解析其中的 @include。"""
     parts: list[str] = []
     d = Path.cwd().resolve()
     while True:
@@ -170,7 +170,7 @@ def load_claude_md() -> str:
         if parent == d:
             break
         d = parent
-    # Load .claude/rules/*.md from cwd
+    # rules 只读取当前项目，避免向上遍历时意外继承其他项目的局部规则。
     rules = _load_rules_dir(Path.cwd())
     claude_md = ""
     if parts:
@@ -179,7 +179,7 @@ def load_claude_md() -> str:
 
 
 def get_git_context() -> str:
-    """Get git branch, recent commits, and status."""
+    """获取分支、近期提交和工作区状态；非 Git 目录或超时时返回空上下文。"""
     try:
         opts = {"encoding": "utf-8", "timeout": 3, "capture_output": True}
         branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], **opts).stdout.strip()
@@ -195,27 +195,19 @@ def get_git_context() -> str:
         return ""
 
 
-# ─── Static / dynamic split for prefix caching ───────────────
-# Claude Code splits the system prompt at a static/dynamic boundary so the
-# static half (identical for every user and every session) can sit behind a
-# cache_control breakpoint, while volatile per-session context lives after
-# the boundary or in the message array. We mirror that split here: the
-# template above is the static core; env/git/memory/skills are the dynamic
-# tail; CLAUDE.md + date are pushed into a <system-reminder> message (see
-# build_user_context_reminder) that the agent injects into the FIRST user
-# message — Claude Code's prependUserContext. See how-claude-code-works ch3.6
-# "前缀缓存策略".
+# ─── 前缀缓存的静态/动态边界 ─────────────────────────────────
+# 静态模板在用户和会话之间完全一致，适合作为 cache_control 前缀；环境、Git、Memory
+# 和 Skill 会随项目变化，因此放在动态尾部。CLAUDE.md 与日期再由
+# build_user_context_reminder 注入首条用户消息，避免项目内容破坏系统提示词缓存共享。
 
 
 def build_static_system_prompt() -> str:
-    """The all-users-identical core. Never changes between users or sessions,
-    so it is the block we mark with cache_control."""
+    """返回跨用户、跨会话不变的核心提示词，供 `cache_control` 标记。"""
     return SYSTEM_PROMPT_TEMPLATE
 
 
 def build_dynamic_system_context() -> str:
-    """Per-session context: stable within a session but varies by
-    machine/project, so it stays uncached. Kept OUT of the static block."""
+    """返回会话内稳定、但随机器和项目变化的未缓存上下文。"""
     plat = f"{platform.system()} {platform.machine()}"
     shell = (os.environ.get("ComSpec") or "cmd.exe") if sys.platform == "win32" else os.environ.get("SHELL", "/bin/sh")
     git_context = get_git_context()
@@ -239,10 +231,10 @@ def build_dynamic_system_context() -> str:
 
 
 def build_user_context_reminder() -> str:
-    """CLAUDE.md + date, wrapped in <system-reminder>. Project-specific content
-    here would fragment the system prompt cache, so it must stay out of the
-    cached static block. Like Claude Code's prependUserContext, the agent
-    injects this into the first user message of the conversation."""
+    """把 CLAUDE.md 与日期包装为 `<system-reminder>`，供首条用户消息注入。
+
+    项目内容若进入静态系统块会切碎前缀缓存，因此必须留在缓存边界之外。
+    """
     from datetime import date
     today = date.today().isoformat()
     claude_md = load_claude_md()
@@ -259,8 +251,8 @@ def build_user_context_reminder() -> str:
 
 
 def build_system_prompt() -> str:
-    """Combined static + dynamic prompt as a single string. Used by the
-    OpenAI-compatible backend (which relies on the provider's automatic prefix
-    caching) and as a fallback; the Anthropic backend uses the split blocks
-    above so it can place its own cache_control breakpoint."""
+    """合并静态和动态提示词，供 OpenAI 兼容后端及降级路径使用。
+
+    Anthropic 后端会保留两个独立块，以便显式设置 `cache_control` 边界。
+    """
     return f"{build_static_system_prompt()}\n\n{build_dynamic_system_context()}"

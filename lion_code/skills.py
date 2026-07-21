@@ -1,5 +1,7 @@
-"""Skills system — discover, parse, and execute .claude/skills/*/SKILL.md
-Mirrors Claude Code's skill architecture: frontmatter metadata + prompt templates."""
+"""Skill 系统：发现、解析并执行 `.claude/skills/*/SKILL.md`。
+
+文件采用 frontmatter 元数据加提示词模板的结构，与 Claude Code 的 Skill 约定兼容。
+"""
 
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ from pathlib import Path
 
 from .frontmatter import parse_frontmatter
 
-# ─── Types ──────────────────────────────────────────────────
+# ─── 数据结构 ───────────────────────────────────────────────
 
 
 @dataclass
@@ -19,13 +21,13 @@ class SkillDefinition:
     when_to_use: str | None = None
     allowed_tools: list[str] | None = None
     user_invocable: bool = True
-    context: str = "inline"  # "inline" or "fork"
+    context: str = "inline"  # `inline` 复用主上下文，`fork` 使用隔离上下文。
     prompt_template: str = ""
-    source: str = "project"  # "project" or "user"
+    source: str = "project"  # `project` 的同名 Skill 优先于 `user`。
     skill_dir: str = ""
 
 
-# ─── Discovery ──────────────────────────────────────────────
+# ─── 发现与加载 ─────────────────────────────────────────────
 
 _cached_skills: list[SkillDefinition] | None = None
 
@@ -37,11 +39,11 @@ def discover_skills() -> list[SkillDefinition]:
 
     skills: dict[str, SkillDefinition] = {}
 
-    # User-level skills (lower priority)
+    # 先加载低优先级的用户级 Skill，便于项目级同名定义直接覆盖。
     user_dir = Path.home() / ".claude" / "skills"
     _load_skills_from_dir(user_dir, "user", skills)
 
-    # Project-level skills (higher priority, overwrites)
+    # 项目级 Skill 具有更高优先级。
     project_dir = Path.cwd() / ".claude" / "skills"
     _load_skills_from_dir(project_dir, "project", skills)
 
@@ -103,7 +105,7 @@ def _parse_skill_file(
         return None
 
 
-# ─── Resolution ─────────────────────────────────────────────
+# ─── 解析与执行 ─────────────────────────────────────────────
 
 
 def get_skill_by_name(name: str) -> SkillDefinition | None:
@@ -134,7 +136,7 @@ def execute_skill(
     }
 
 
-# ─── System prompt section ──────────────────────────────────
+# ─── 系统提示词片段 ─────────────────────────────────────────
 
 
 def build_skill_descriptions() -> str:
