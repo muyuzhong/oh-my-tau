@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lion_code"
+version = "1.0.0"
+description = "一个用 Python 构建的轻量级编码 Agent"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+lion-code = "lion_code.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["lion_code*"]
