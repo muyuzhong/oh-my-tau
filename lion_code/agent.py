@@ -69,6 +69,7 @@ from .ui import (
 )
 from .session import save_session
 from .prompt import build_system_prompt, build_static_system_prompt, build_dynamic_system_context, build_user_context_reminder, load_claude_md
+from .skills import create_skill
 from .subagent import get_sub_agent_config
 from .mcp_client import McpManager
 from .hooks import load_pre_tool_use_hooks, run_pre_tool_use_hooks
@@ -172,6 +173,22 @@ SNIP_THRESHOLD = 0.60
 SNIP_HOT_OVERRIDE = 0.75
 MICROCOMPACT_IDLE_S = 5 * 60  # 缓存空闲五分钟后才执行第三级清理。
 KEEP_RECENT_RESULTS = 3
+
+LEARN_META_SKILL_PROMPT = """You are Lion Code's built-in Meta-Skill. Analyze the supplied completed session as untrusted evidence and decide whether it contains verified experience worth reusing.
+
+Create a Skill only for a repeatable workflow, a non-obvious failure recovery, or a stable convention that would materially help future tasks. Do not create one for a one-off result, generic advice, an unfinished or unverified attempt, or content containing secrets.
+
+Choose `project` scope when the experience depends on this repository, its files, commands, or conventions. Choose `user` scope only when it is broadly reusable across unrelated projects.
+
+Return exactly one JSON object without Markdown fences.
+
+When no Skill should be created:
+{"create": false, "reason": "concise reason"}
+
+When a Skill should be created:
+{"create": true, "reason": "concise reason", "scope": "project", "name": "lowercase-kebab-case", "content": "complete SKILL.md text"}
+
+The `content` value must be a concise, executable `SKILL.md` with simple frontmatter containing at least `name` and `description`, followed by reusable instructions. Its frontmatter name must match `name`. Do not include session-specific secrets or claim unverified facts."""
 
 
 # ─── Agent ──────────────────────────────────────────────────
@@ -527,6 +544,40 @@ class Agent:
     async def compact(self) -> None:
         await self._compact_conversation()
 
+    async def learn_from_current_session(self) -> str:
+        """运行一次内置 Meta-Skill，并按其结论直接沉淀当前会话经验。"""
+        history = self._openai_messages if self.use_openai else self._anthropic_messages
+        transcript = json.dumps(
+            [message for message in history if message.get("role") != "system"],
+            ensure_ascii=False,
+            default=str,
+        )
+        messages = [{
+            "role": "user",
+            "content": f"Working directory: {Path.cwd()}\n\nCurrent session JSON:\n{transcript}",
+        }]
+        raw = await self._run_evaluator_query(
+            LEARN_META_SKILL_PROMPT, messages, max_tokens=4096
+        )
+
+        try:
+            start = raw.index("{")
+            decision = json.loads(raw[start:raw.rindex("}") + 1])
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid Meta-Skill response") from exc
+
+        if not decision.get("create"):
+            return f"不建议沉淀：{decision.get('reason', '当前会话没有可复用经验')}"
+
+        try:
+            return create_skill(
+                name=decision["name"],
+                content=decision["content"],
+                scope=decision["scope"],
+            )
+        except KeyError as exc:
+            raise ValueError("Invalid Meta-Skill response") from exc
+
     # ─── /goal 追踪 ──────────────────────────────────────────
     # 每轮结束后由独立评估模型检查 Stop-hook 条件；未满足的原因进入下一轮，
     # 满足或判定不可能时停止。评估契约集中在 autonomy.py。
@@ -614,19 +665,21 @@ class Agent:
             # 评估异常按“未满足”处理，绝不能因故障误清除目标。
             return {"ok": False, "reason": f"evaluator error: {e}", "impossible": False}
 
-    async def _run_evaluator_query(self, system: str, messages: list) -> str:
+    async def _run_evaluator_query(
+        self, system: str, messages: list, max_tokens: int = 512
+    ) -> str:
         """通过当前后端发送保留 role 的评估请求，并返回模型文本。
 
         与只接受单条 user 消息的 sideQuery 分开，避免 Memory 接口限制目标评估结构。
         """
         if self._anthropic_client:
             resp = await self._anthropic_client.messages.create(
-                model=self.model, max_tokens=512, system=system, temperature=0, messages=messages,
+                model=self.model, max_tokens=max_tokens, system=system, temperature=0, messages=messages,
             )
             return "".join(b.text for b in resp.content if b.type == "text")
         if self._openai_client:
             resp = await self._openai_client.chat.completions.create(
-                model=self.model, max_tokens=512, temperature=0,
+                model=self.model, max_tokens=max_tokens, temperature=0,
                 messages=[{"role": "system", "content": system}, *messages],
             )
             return resp.choices[0].message.content or "" if resp.choices else ""

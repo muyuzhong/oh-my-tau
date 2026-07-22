@@ -147,6 +147,12 @@ async def run_repl(agent: Agent) -> None:
             except Exception as e:
                 print_error(str(e))
             continue
+        if inp == "/learn":
+            try:
+                print_info(await agent.learn_from_current_session())
+            except Exception as e:
+                print_error(str(e))
+            continue
         if inp == "/goal" or inp.startswith("/goal "):
             condition = inp[len("/goal"):].strip()
             if not condition:
@@ -245,6 +251,7 @@ REPL commands:
   /plan               Toggle plan mode (read-only <-> normal)
   /cost               Show token usage and cost
   /compact            Manually compact conversation
+  /learn              Distill this session into a reusable Skill when worthwhile
   /goal <condition>   Pursue a goal across turns until an evaluator judges it met
   /goal               Show the active goal's status
   /loop [interval] <prompt>  Re-run a prompt on an interval (5m/2h) or self-paced

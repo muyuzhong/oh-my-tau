@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -171,3 +172,19 @@ def build_skill_descriptions() -> str:
 def reset_skill_cache() -> None:
     global _cached_skills
     _cached_skills = None
+
+
+def create_skill(name: str, content: str, scope: str = "project") -> str:
+    """把模型提炼出的完整 `SKILL.md` 写入项目级或用户级目录。"""
+    if not re.fullmatch(r"[a-z0-9-]+", name):
+        return "Invalid skill name"
+
+    root = Path.home() if scope == "user" else Path.cwd()
+    skill_path = root / ".claude" / "skills" / name / "SKILL.md"
+    if skill_path.exists():
+        return "Skill already exists"
+
+    skill_path.parent.mkdir(parents=True, exist_ok=True)
+    skill_path.write_text(content, encoding="utf-8")
+    reset_skill_cache()
+    return f"Skill created: {skill_path}"

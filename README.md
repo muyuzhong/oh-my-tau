@@ -131,6 +131,7 @@ lion-code --resume
 | /plan | 切换 Plan 模式 |
 | /cost | 查看 Token 使用量和费用 |
 | /compact | 压缩当前对话 |
+| /learn | 判断并沉淀当前会话中的可复用经验 |
 | /memory | 查看已保存的记忆 |
 | /skills | 查看可用 Skill |
 | /goal <条件> | 持续工作直到目标满足 |
