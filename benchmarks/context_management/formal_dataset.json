@@ -1,0 +1,185 @@
+{
+  "version": 2,
+  "title": "Lion Code 上下文管理最小正式评测集",
+  "language": "zh-CN",
+  "effective_window_tokens": 180000,
+  "provider_advertised_window_tokens": 1000000,
+  "load_band_basis": "按 summary_only 压缩前工作量构造；正式报告同时给出各策略实际峰值",
+  "model": "deepseek-v4-flash",
+  "pricing_source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+  "pricing_cny_per_million_tokens": {
+    "cache_hit_input": 0.02,
+    "cache_miss_input": 1.0,
+    "output": 2.0
+  },
+  "policies": [
+    "summary_only",
+    "managed_eager",
+    "managed"
+  ],
+  "repeat_count": 2,
+  "tasks": [
+    {
+      "id": "pricing_split",
+      "name": "区分缓存命中与未命中的费用计算",
+      "category": "single_file_fix",
+      "load_band": "medium_60_70",
+      "fixture_id": "pricing_split",
+      "turns": 7,
+      "user_payload_bytes": 40000,
+      "tool_payload_bytes": 29000,
+      "large_result_turns": [2],
+      "large_tool_payload_bytes": 48000,
+      "source_files": ["lion_code/agent.py", "benchmarks/context_management/benchmark.py"],
+      "contract_turns": {
+        "1": "计费契约：缓存命中输入 0.02 元/百万 token，缓存未命中输入 1 元/百万 token，输出 2 元/百万 token。",
+        "4": "边界契约：cache_hit_tokens 必须限制在 0 到 prompt_tokens，miss 使用剩余输入 token。"
+      },
+      "acceptance": "正确计算全命中、部分命中、越界命中和负命中四种费用。"
+    },
+    {
+      "id": "static_dynamic_prompt",
+      "name": "拆分静态系统提示词与动态项目上下文",
+      "category": "multi_file_change",
+      "load_band": "medium_60_70",
+      "fixture_id": "static_dynamic_prompt",
+      "turns": 7,
+      "user_payload_bytes": 40000,
+      "tool_payload_bytes": 29000,
+      "large_result_turns": [2],
+      "large_tool_payload_bytes": 48000,
+      "source_files": ["lion_code/prompt.py", "lion_code/agent.py"],
+      "contract_turns": {
+        "1": "缓存契约：system 只能包含跨工作区稳定的 You are Lion Code.，cwd 与日期必须进入首条 user reminder。",
+        "4": "接口契约：build_request 仍返回 OpenAI messages 列表，用户原始文本必须保留在 reminder 之后。"
+      },
+      "acceptance": "不同 cwd/日期下 system 完全一致，动态信息和用户文本位于首条 user 消息。"
+    },
+    {
+      "id": "keep_recent_offbyone",
+      "name": "诊断并修复最近结果保留数量的边界错误",
+      "category": "diagnosis_and_fix",
+      "load_band": "medium_60_70",
+      "fixture_id": "keep_recent_offbyone",
+      "turns": 7,
+      "user_payload_bytes": 40000,
+      "tool_payload_bytes": 29000,
+      "large_result_turns": [2],
+      "large_tool_payload_bytes": 48000,
+      "source_files": ["lion_code/agent.py", "tests/test_autonomy.py"],
+      "contract_turns": {
+        "1": "保留契约：KEEP_RECENT_RESULTS=3，恰好保留最后三条，较短输入不得被裁剪。",
+        "4": "稳定性契约：重复执行 snip_stale 必须幂等，keep_recent=0 时全部替换。"
+      },
+      "acceptance": "修复 off-by-one，并通过短列表、空列表、幂等和零保留边界测试。"
+    },
+    {
+      "id": "normalize_fact",
+      "name": "修复事实规范化吞掉命令空格的问题",
+      "category": "single_file_fix",
+      "load_band": "high_75_85",
+      "fixture_id": "normalize_fact",
+      "turns": 8,
+      "user_payload_bytes": 41000,
+      "tool_payload_bytes": 30000,
+      "large_result_turns": [2, 6],
+      "large_tool_payload_bytes": 48000,
+      "source_files": ["benchmarks/context_management/benchmark.py", "lion_code/memory.py"],
+      "contract_turns": {
+        "1": "规范化契约：只移除 = 与 : 两侧空白以及首尾空白，命令、路径和自然语言内部空格必须保留。",
+        "5": "兼容契约：实现可以使用标准库 re，但不得改变不含结构分隔符的普通文本。"
+      },
+      "acceptance": "命令、中文说明、带空格路径和普通文本均保持语义空格。"
+    },
+    {
+      "id": "hot_prefix_policy",
+      "name": "实现热缓存区间的前缀保护策略",
+      "category": "multi_file_change",
+      "load_band": "high_75_85",
+      "fixture_id": "hot_prefix_policy",
+      "turns": 8,
+      "user_payload_bytes": 41000,
+      "tool_payload_bytes": 30000,
+      "large_result_turns": [2, 6],
+      "large_tool_payload_bytes": 48000,
+      "source_files": ["lion_code/agent.py", "lion_code/prompt.py"],
+      "contract_turns": {
+        "1": "阈值契约：SNIP_THRESHOLD=0.60，SNIP_HOT_OVERRIDE=0.75，缓存热窗口为 300 秒。",
+        "5": "行为契约：热且低于 0.75 时不裁剪；冷且达到 0.60 或任何达到 0.75 的上下文均裁剪，只保留最近三条。"
+      },
+      "acceptance": "两个模块共同满足热/冷缓存阈值和最近三条结果保留规则。"
+    },
+    {
+      "id": "usage_nested",
+      "name": "兼容 DeepSeek 与 OpenAI 风格 usage 字段",
+      "category": "diagnosis_and_fix",
+      "load_band": "high_75_85",
+      "fixture_id": "usage_nested",
+      "turns": 8,
+      "user_payload_bytes": 41000,
+      "tool_payload_bytes": 30000,
+      "large_result_turns": [2, 6],
+      "large_tool_payload_bytes": 48000,
+      "source_files": ["benchmarks/context_management/benchmark.py", "lion_code/agent.py"],
+      "contract_turns": {
+        "1": "字段契约：优先读取顶层 prompt_cache_hit_tokens/prompt_cache_miss_tokens，缺失时回退 prompt_tokens_details.cached_tokens。",
+        "5": "守恒契约：hit 限制在 prompt 范围；hit+miss 与 prompt 不一致时以 prompt-hit 重算 miss。"
+      },
+      "acceptance": "正确解析 DeepSeek 顶层字段、OpenAI 嵌套字段和不一致或缺失的 usage。"
+    },
+    {
+      "id": "truncate_utf8",
+      "name": "按 UTF-8 字节预算保留结果首尾",
+      "category": "single_file_fix",
+      "load_band": "critical_85_95",
+      "fixture_id": "truncate_utf8",
+      "turns": 9,
+      "user_payload_bytes": 52000,
+      "tool_payload_bytes": 30000,
+      "large_result_turns": [2, 5, 8],
+      "large_tool_payload_bytes": 48000,
+      "source_files": ["lion_code/tools.py", "lion_code/agent.py"],
+      "contract_turns": {
+        "1": "截断契约：max_bytes 是 UTF-8 字节上限，返回值必须始终可重新编码且不超过上限。",
+        "5": "信息契约：预算足够时同时保留开头、结尾和 ...[truncated]... 标记；短文本原样返回。"
+      },
+      "acceptance": "中文长文本、短文本和极小预算均不破坏 UTF-8 或超过字节上限。"
+    },
+    {
+      "id": "compact_pairing",
+      "name": "压缩后保持工具消息配对与最新用户请求",
+      "category": "multi_file_change",
+      "load_band": "critical_85_95",
+      "fixture_id": "compact_pairing",
+      "turns": 9,
+      "user_payload_bytes": 52000,
+      "tool_payload_bytes": 30000,
+      "large_result_turns": [2, 5, 8],
+      "large_tool_payload_bytes": 48000,
+      "source_files": ["lion_code/agent.py", "lion_code/session.py"],
+      "contract_turns": {
+        "1": "压缩契约：结果顺序必须是 system、summary user、ack assistant、latest plain user，不得遗留孤立 tool 消息。",
+        "5": "边界契约：plain user 的 content 必须是字符串；空历史返回空列表，最新普通用户请求不得丢失。"
+      },
+      "acceptance": "跨两个模块正确识别普通用户消息，并生成满足角色交替的压缩历史。"
+    },
+    {
+      "id": "same_file_dedupe",
+      "name": "诊断同文件重复读取与最近结果联合保留",
+      "category": "diagnosis_and_fix",
+      "load_band": "critical_85_95",
+      "fixture_id": "same_file_dedupe",
+      "turns": 9,
+      "user_payload_bytes": 52000,
+      "tool_payload_bytes": 30000,
+      "large_result_turns": [2, 5, 8],
+      "large_tool_payload_bytes": 48000,
+      "source_files": ["lion_code/agent.py", "lion_code/tools.py"],
+      "contract_turns": {
+        "1": "去重契约：保留每个 path 的最新一次读取，同时无条件保留全局最近三条，二者取并集。",
+        "5": "副作用契约：返回新字典列表，不得原地修改调用方传入的 results。"
+      },
+      "acceptance": "旧重复读取被裁剪，唯一文件最新读取和全局最近三条均保留，输入不被修改。"
+    }
+  ]
+}

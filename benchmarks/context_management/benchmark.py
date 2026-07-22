@@ -319,6 +319,7 @@ def api_call(
     max_tokens: int,
     budget: Budget,
     response_format: dict[str, str] | None = None,
+    tool_choice: str | dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, int], float]:
     budget.reserve_or_raise(prompt_chars(messages, tools), max_tokens)
     kwargs: dict[str, Any] = {
@@ -330,6 +331,8 @@ def api_call(
     }
     if tools:
         kwargs["tools"] = tools
+    if tool_choice is not None:
+        kwargs["tool_choice"] = tool_choice
     if response_format:
         kwargs["response_format"] = response_format
     response = client.chat.completions.create(**kwargs)
