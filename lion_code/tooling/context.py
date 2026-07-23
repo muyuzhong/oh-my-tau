@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from .types import JSONValue, ToolResult
 
-if False:  # pragma: no cover - 仅供静态类型检查器解析循环引用。
+if TYPE_CHECKING:
     from .registry import ToolRegistry
 
 

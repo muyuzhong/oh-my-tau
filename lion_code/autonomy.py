@@ -163,28 +163,6 @@ def is_daily_wording(raw: str) -> bool:
 # 本项目未实现云端调度，但保留同一决策提示点。
 OFFER_CLOUD_THRESHOLD_SECONDS = 3600
 
-# ScheduleWakeup 是动态模式的驱动器。三个字段及 [60, 3600] 秒限制与观察到的
-# wire schema 一致；主模型通过调用它安排下一轮，不调用即表示循环已收敛。
-SCHEDULE_WAKEUP_TOOL = {
-    "name": "schedule_wakeup",
-    "description": (
-        "Schedule when to resume work in /loop dynamic mode — you were invoked via /loop "
-        "without an interval and are asked to self-pace. Pass the same /loop prompt back via "
-        "`prompt` so the next firing repeats the task. To end the loop, simply do not call this "
-        "tool. delaySeconds is clamped to [60, 3600]."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "delaySeconds": {"type": "number", "description": "Seconds from now to wake up (clamped to [60, 3600])."},
-            "reason": {"type": "string", "description": "One short sentence explaining the chosen delay."},
-            "prompt": {"type": "string", "description": "The /loop prompt to run on wake-up (pass the same prompt to repeat the task)."},
-        },
-        "required": ["delaySeconds", "reason", "prompt"],
-    },
-}
-
-
 def clamp_wakeup_delay(seconds) -> int:
     """把唤醒延迟限制在 [60, 3600] 秒，并使用与 JS Math.round 一致的半入舍入。
 

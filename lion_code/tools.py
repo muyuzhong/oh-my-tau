@@ -32,72 +32,11 @@ IS_WIN = sys.platform == "win32"
 
 ToolDef = dict  # Anthropic 工具 schema；OpenAI 格式在 Agent 层转换。
 
-# ─── 兼容内部工具定义 ────────────────────────────────────────
-# 普通工具的 Schema 已与执行函数一起迁入 tooling/builtin.py；这里仅暂存尚未
-# 注册化的内部工具，供 PR 2 之前的旧入口使用。
-
-_LEGACY_INTERNAL_TOOL_DEFINITIONS: list[ToolDef] = [
-    {
-        "name": "skill",
-        "description": "Invoke a registered skill by name. Skills are prompt templates loaded from .claude/skills/. Returns the skill's resolved prompt to follow.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "skill_name": {"type": "string", "description": "The name of the skill to invoke"},
-                "args": {"type": "string", "description": "Optional arguments to pass to the skill"},
-            },
-            "required": ["skill_name"],
-        },
-    },
-    {
-        "name": "enter_plan_mode",
-        "description": "Enter plan mode to switch to a read-only planning phase. In plan mode, you can only read files and write to the plan file.",
-        "input_schema": {"type": "object", "properties": {}},
-        "deferred": True,
-    },
-    {
-        "name": "exit_plan_mode",
-        "description": "Exit plan mode after you have finished writing your plan to the plan file.",
-        "input_schema": {"type": "object", "properties": {}},
-        "deferred": True,
-    },
-    {
-        "name": "agent",
-        "description": "Launch a sub-agent to handle a task autonomously. Sub-agents have isolated context and return their result. Types: 'explore' (read-only), 'plan' (read-only, structured planning), 'general' (full tools).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "description": {"type": "string", "description": "Short (3-5 word) description of the sub-agent's task"},
-                "prompt": {"type": "string", "description": "Detailed task instructions for the sub-agent"},
-                "type": {"type": "string", "enum": ["explore", "plan", "general"], "description": "Agent type. Default: general"},
-            },
-            "required": ["description", "prompt"],
-        },
-    },
-    # 延迟工具只在模型明确搜索后激活，减少常规请求的 schema Token 占用。
-    {
-        "name": "tool_search",
-        "description": "Search for available tools by name or keyword. Returns full schema definitions for matching deferred tools so you can use them.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Tool name or search keywords"},
-            },
-            "required": ["query"],
-        },
-    },
-]
-
-# 模块加载末尾会从统一工具对象生成普通工具的兼容 Schema。
+# 模块加载末尾会从统一工具对象生成兼容 Schema。
 tool_definitions: list[ToolDef]
 
-# ─── 延迟工具激活 ───────────────────────────────────────────
-
-_activated_tools: set[str] = set()
-
-
 def reset_activated_tools() -> None:
-    _activated_tools.clear()
+    """Deprecated：激活状态现由每个 Agent 的 ToolRegistry 持有。"""
 
 
 def get_active_tool_definitions(all_tools: list[ToolDef] | None = None) -> list[ToolDef]:
@@ -106,14 +45,14 @@ def get_active_tool_definitions(all_tools: list[ToolDef] | None = None) -> list[
     return [
         {k: v for k, v in t.items() if k != "deferred"}
         for t in tools
-        if not t.get("deferred") or t["name"] in _activated_tools
+        if not t.get("deferred")
     ]
 
 
 def get_deferred_tool_names(all_tools: list[ToolDef] | None = None) -> list[str]:
     """返回尚未激活的延迟工具名称。"""
     tools = all_tools if all_tools is not None else tool_definitions
-    return [t["name"] for t in tools if t.get("deferred") and t["name"] not in _activated_tools]
+    return [t["name"] for t in tools if t.get("deferred")]
 
 
 # ─── 工具执行 ───────────────────────────────────────────────
@@ -605,23 +544,6 @@ async def execute_tool(
                 verb = "writing" if name == "write_file" else "editing"
                 return f"Warning: {inp['file_path']} was modified externally since your last read. Please read_file again before {verb}."
 
-    # tool_search 激活匹配的延迟工具，并把完整 schema 返回给模型。
-    if name == "tool_search":
-        query = (inp.get("query") or "").lower()
-        deferred = [t for t in tool_definitions if t.get("deferred")]
-        matches = [
-            t for t in deferred
-            if query in t["name"].lower() or query in (t.get("description") or "").lower()
-        ]
-        if not matches:
-            return "No matching deferred tools found."
-        for m in matches:
-            _activated_tools.add(m["name"])
-        return json.dumps(
-            [{"name": t["name"], "description": t.get("description", ""), "input_schema": t["input_schema"]} for t in matches],
-            indent=2,
-        )
-
     handlers: dict = {
         "write_file": _write_file,
         "edit_file": _edit_file,
@@ -653,8 +575,17 @@ def reset_permission_cache() -> None:
 
 # 保留旧导入入口，但普通工具 Schema 的唯一事实来源是 LionTool。
 from .tooling.builtin import create_builtin_tools  # noqa: E402
+from .tooling.internal import create_internal_tools  # noqa: E402
+
+
+def _compat_tool_schema(tool) -> ToolDef:
+    schema = tool.to_anthropic_schema()
+    if tool.capabilities.deferred:
+        schema["deferred"] = True
+    return schema
+
 
 tool_definitions = [
-    tool.to_anthropic_schema()
-    for tool in create_builtin_tools()
-] + _LEGACY_INTERNAL_TOOL_DEFINITIONS
+    _compat_tool_schema(tool)
+    for tool in [*create_builtin_tools(), *create_internal_tools()]
+]

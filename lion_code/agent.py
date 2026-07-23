@@ -9,6 +9,7 @@ import json
 import os
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Awaitable
 
@@ -20,7 +21,6 @@ from .tools import (
     execute_tool,
     check_permission,
     CONCURRENCY_SAFE_TOOLS,
-    get_active_tool_definitions,
     ToolDef,
     PermissionMode,
     _truncate_result,
@@ -41,7 +41,6 @@ from .autonomy import (
     parse_loop_input,
     is_daily_wording,
     OFFER_CLOUD_THRESHOLD_SECONDS,
-    SCHEDULE_WAKEUP_TOOL,
     clamp_wakeup_delay,
     dynamic_loop_directive,
     LOOP_MAX_ITERATIONS,
@@ -74,9 +73,15 @@ from .skills import create_skill
 from .subagent import get_sub_agent_config
 from .mcp_client import McpManager
 from .hooks import HookOutcome, load_pre_tool_use_hooks, run_pre_tool_use_hooks
-from .tooling import ToolRegistry, ToolRuntime
-from .tooling.builtin import BUILTIN_TOOL_NAMES, create_builtin_tools
+from .tooling import ToolRegistry, ToolResult, ToolRuntime
+from .tooling.builtin import create_builtin_tools
 from .tooling.context import ToolContext
+from .tooling.internal import (
+    create_internal_tools,
+    create_legacy_mcp_tool,
+    create_schedule_wakeup_tool,
+)
+from .tooling.types import JSONValue
 
 # ─── 指数退避重试 ───────────────────────────────────────────
 
@@ -246,10 +251,6 @@ class Agent:
         # 动态 /loop 中，模型调用 schedule_wakeup 后写入；本轮收敛后由驱动器读取并清空。
         self.pending_wakeup: dict | None = None
         self.loop_stop = False  # 中断时置位，使正在运行的 loop 尽快退出。
-        # schedule_wakeup 仅在动态 loop 激活时路由到内部执行器，避免覆盖同名外部工具，
-        # 也防止普通对话越权调用。
-        self.schedule_wakeup_enabled = False
-
         # Auto Mode 按 DENIAL_LIMITS 追踪连续和累计拒绝次数。
         self.auto_consecutive_denials = 0
         self.auto_total_denials = 0
@@ -281,6 +282,9 @@ class Agent:
         selected_tool_names = {tool["name"] for tool in self.tools}
         self.tool_registry = ToolRegistry()
         for tool in create_builtin_tools(self._read_file_state):
+            if tool.name in selected_tool_names:
+                self.tool_registry.register(tool)
+        for tool in create_internal_tools():
             if tool.name in selected_tool_names:
                 self.tool_registry.register(tool)
         self.tool_context = ToolContext(
@@ -318,7 +322,9 @@ class Agent:
             self._dynamic_system_context = ""
         else:
             self._static_system_prompt = build_static_system_prompt()
-            self._dynamic_system_context = build_dynamic_system_context()
+            self._dynamic_system_context = build_dynamic_system_context(
+                self.tool_registry.deferred_tool_names()
+            )
             self._user_context_reminder = build_user_context_reminder()
         self._base_system_prompt = (
             self._static_system_prompt + "\n\n" + self._dynamic_system_context
@@ -468,20 +474,11 @@ class Agent:
         return {"input": self.total_input_tokens, "output": self.total_output_tokens}
 
     def _active_anthropic_tools(self) -> list[dict]:
-        """按当前兼容顺序生成 Schema，普通工具以 Registry 为事实来源。"""
-        active_builtins = {
-            tool.name: tool.to_anthropic_schema()
+        """每次模型调用前读取当前 Registry，避免缓存过期的激活状态。"""
+        return [
+            tool.to_anthropic_schema()
             for tool in self.tool_registry.active_tools()
-        }
-        schemas: list[dict] = []
-        for schema in get_active_tool_definitions(self.tools):
-            name = schema["name"]
-            if name in BUILTIN_TOOL_NAMES:
-                if name in active_builtins:
-                    schemas.append(active_builtins[name])
-                continue
-            schemas.append(schema)
-        return schemas
+        ]
 
     # ─── 主对话入口 ──────────────────────────────────────────
 
@@ -494,6 +491,10 @@ class Agent:
                 mcp_defs = self._mcp_manager.get_tool_definitions()
                 if mcp_defs:
                     self.tools = self.tools + mcp_defs
+                    for schema in mcp_defs:
+                        self.tool_registry.register(
+                            create_legacy_mcp_tool(self._mcp_manager, schema)
+                        )
             except Exception as e:
                 print(f"[mcp] Init failed: {e}", flush=True)
 
@@ -870,45 +871,38 @@ class Agent:
             "⟳ /loop dynamic (self-paced) — the model schedules its own next run, or ends the "
             "loop. Ctrl+C to stop."
         )
-        had_tool = any(t["name"] == "schedule_wakeup" for t in self.tools)
-        if not had_tool:
-            self.tools = self.tools + [SCHEDULE_WAKEUP_TOOL]
-        self.schedule_wakeup_enabled = True
         prompt = spec["prompt"]
         iterations = 0
-        try:
-            while not self.loop_stop and not self._aborted:
-                iterations += 1
-                self.pending_wakeup = None
-                await self.chat(dynamic_loop_directive(prompt))
+        with self.tool_registry.temporary_tool(create_schedule_wakeup_tool()):
+            try:
+                while not self.loop_stop and not self._aborted:
+                    iterations += 1
+                    self.pending_wakeup = None
+                    await self.chat(dynamic_loop_directive(prompt))
 
-                if not self.pending_wakeup:
-                    plural = "" if iterations == 1 else "s"
-                    print_info(f"⟳ Loop converged after {iterations} tick{plural} (model scheduled no wakeup).")
-                    break
-                budget = self._check_budget()
-                if budget["exceeded"]:
-                    print_info(f"Loop stopped: {budget['reason']}")
-                    break
-                if self.max_turns is not None and iterations >= self.max_turns:
-                    print_info(f"Loop stopped: tick limit reached ({iterations} >= {self.max_turns}).")
-                    break
-                if iterations >= LOOP_MAX_ITERATIONS:
-                    print_info(f"Loop stopped: reached {LOOP_MAX_ITERATIONS} ticks.")
-                    break
-                delay = self.pending_wakeup["delay_seconds"]
-                print_info(f"⟳ next run in {delay}s — {self.pending_wakeup['reason']}")
-                prompt = self.pending_wakeup["prompt"] or prompt
-                interrupted = await self._interruptible_sleep(delay)
-                if interrupted:
-                    print_info("Loop stopped.")
-                    break
-        finally:
-            # 动态 loop 结束后移除临时工具，防止普通对话继续调用内部调度入口。
-            if not had_tool:
-                self.tools = [t for t in self.tools if t["name"] != "schedule_wakeup"]
-            self.schedule_wakeup_enabled = False
-            self.pending_wakeup = None
+                    if not self.pending_wakeup:
+                        plural = "" if iterations == 1 else "s"
+                        print_info(f"⟳ Loop converged after {iterations} tick{plural} (model scheduled no wakeup).")
+                        break
+                    budget = self._check_budget()
+                    if budget["exceeded"]:
+                        print_info(f"Loop stopped: {budget['reason']}")
+                        break
+                    if self.max_turns is not None and iterations >= self.max_turns:
+                        print_info(f"Loop stopped: tick limit reached ({iterations} >= {self.max_turns}).")
+                        break
+                    if iterations >= LOOP_MAX_ITERATIONS:
+                        print_info(f"Loop stopped: reached {LOOP_MAX_ITERATIONS} ticks.")
+                        break
+                    delay = self.pending_wakeup["delay_seconds"]
+                    print_info(f"⟳ next run in {delay}s — {self.pending_wakeup['reason']}")
+                    prompt = self.pending_wakeup["prompt"] or prompt
+                    interrupted = await self._interruptible_sleep(delay)
+                    if interrupted:
+                        print_info("Loop stopped.")
+                        break
+            finally:
+                self.pending_wakeup = None
 
     def _execute_schedule_wakeup(self, inp: dict) -> str:
         """记录唤醒请求；延迟限制在 [60, 3600]，本轮收敛后由 loop 驱动器读取。"""
@@ -1298,29 +1292,47 @@ class Agent:
                 "The hook system failed. Do not interpret this as user intent."
             )
 
-        if name in ("enter_plan_mode", "exit_plan_mode"):
-            return await self._execute_plan_mode_tool(name)
-        if name == "agent":
-            return await self._execute_agent_tool(inp)
-        if name == "skill":
-            return await self._execute_skill_tool(inp)
-        if name == "schedule_wakeup":
-            # 只有动态 loop 驱动器可进入此分支；额外守卫阻止游离调用或同名外部工具
-            # 误达内部执行器。
-            if not self.schedule_wakeup_enabled:
-                return "schedule_wakeup is only available during /loop dynamic mode."
-            return self._execute_schedule_wakeup(inp)
-        # MCP 前缀工具交给连接管理器解析 Server 与实际工具名。
-        if self._mcp_manager.is_mcp_tool(name):
-            return await self._mcp_manager.call_tool(name, inp)
-        if name == "tool_search":
-            return await execute_tool(name, inp, self._read_file_state)
+        self.tool_context.permission_mode = self.permission_mode
+        self.tool_context.plan_file_path = self._plan_file_path
         result = await self.tool_runtime.execute(
             tool_call_id=tool_call_id,
             name=name,
             arguments=inp,
         )
         return result.content
+
+    async def run_subagent_tool(
+        self,
+        arguments: Mapping[str, JSONValue],
+    ) -> ToolResult:
+        """向 agent 工具暴露受限的子 Agent 业务入口。"""
+        return ToolResult(content=await self._execute_agent_tool(dict(arguments)))
+
+    async def run_skill_tool(
+        self,
+        arguments: Mapping[str, JSONValue],
+    ) -> ToolResult:
+        """向 skill 工具暴露受限的 Skill 业务入口。"""
+        return ToolResult(content=await self._execute_skill_tool(dict(arguments)))
+
+    async def enter_plan_mode_tool(self) -> ToolResult:
+        """进入 Plan 模式并返回结构化工具结果。"""
+        return ToolResult(
+            content=await self._execute_plan_mode_tool("enter_plan_mode")
+        )
+
+    async def exit_plan_mode_tool(self) -> ToolResult:
+        """退出 Plan 模式并返回结构化工具结果。"""
+        return ToolResult(
+            content=await self._execute_plan_mode_tool("exit_plan_mode")
+        )
+
+    async def schedule_wakeup_tool(
+        self,
+        arguments: Mapping[str, JSONValue],
+    ) -> ToolResult:
+        """记录动态循环的下一次唤醒请求。"""
+        return ToolResult(content=self._execute_schedule_wakeup(dict(arguments)))
 
     # ─── Skill fork 模式 ─────────────────────────────────────
 

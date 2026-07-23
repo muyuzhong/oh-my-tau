@@ -206,7 +206,9 @@ def build_static_system_prompt() -> str:
     return SYSTEM_PROMPT_TEMPLATE
 
 
-def build_dynamic_system_context() -> str:
+def build_dynamic_system_context(
+    deferred_tool_names: list[str] | None = None,
+) -> str:
     """返回会话内稳定、但随机器和项目变化的未缓存上下文。"""
     plat = f"{platform.system()} {platform.machine()}"
     shell = (os.environ.get("ComSpec") or "cmd.exe") if sys.platform == "win32" else os.environ.get("SHELL", "/bin/sh")
@@ -215,7 +217,11 @@ def build_dynamic_system_context() -> str:
     skills_section = build_skill_descriptions()
     agent_section = build_agent_descriptions()
 
-    deferred_names = get_deferred_tool_names()
+    deferred_names = (
+        get_deferred_tool_names()
+        if deferred_tool_names is None
+        else deferred_tool_names
+    )
     deferred_section = (
         f"\n\nThe following deferred tools are available via tool_search: {', '.join(deferred_names)}. Use tool_search to fetch their full schemas when needed."
         if deferred_names else ""
