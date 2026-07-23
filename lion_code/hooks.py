@@ -19,7 +19,9 @@ from typing import Any, Awaitable, Callable
 
 
 DEFAULT_HOOK_TIMEOUT_MS = 5000
-MAX_HOOK_OUTPUT_BYTES = 64 * 1024
+MAX_STDOUT_BYTES = 64 * 1024
+MAX_STDERR_BYTES = 16 * 1024
+MAX_HOOK_INPUT_BYTES = 256 * 1024
 MAX_HOOK_ERROR_BYTES = 4096
 SAFE_ENV_NAMES = {
     "PATH",
@@ -43,6 +45,14 @@ TrustConfirm = Callable[[str], Awaitable[bool]]
 class HookSource(str, Enum):
     USER = "user"
     PROJECT = "project"
+
+
+class HookOutputLimitExceeded(Exception):
+    """Hook 输出流超过允许的内存边界。"""
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        super().__init__(f"Hook output exceeded {limit} bytes")
 
 
 @dataclass(frozen=True)
@@ -389,7 +399,7 @@ async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await killer.communicate()
+            await killer.wait()
         except OSError:
             pass
     else:
@@ -403,10 +413,42 @@ async def _kill_and_reap(process: asyncio.subprocess.Process) -> None:
             process.kill()
         except ProcessLookupError:
             pass
+    await process.wait()
+
+
+async def read_limited(stream: asyncio.StreamReader, limit: int) -> bytes:
+    """读取单条 Hook 输出流，超过字节上限时立即失败。"""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await stream.read(8192)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > limit:
+            raise HookOutputLimitExceeded(limit)
+        chunks.append(chunk)
+
+
+async def _write_payload(stream: asyncio.StreamWriter, payload: bytes) -> None:
     try:
-        await process.communicate()
+        stream.write(payload)
+        await stream.drain()
     except (BrokenPipeError, ConnectionResetError):
-        await process.wait()
+        pass
+    finally:
+        stream.close()
+
+
+async def _abort_hook_tasks(
+    process: asyncio.subprocess.Process,
+    tasks: tuple[asyncio.Task[Any], ...],
+) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    await _kill_and_reap(process)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _decode_diagnostic(data: bytes) -> str:
@@ -415,6 +457,9 @@ def _decode_diagnostic(data: bytes) -> str:
 
 async def _run_command_hook(hook: HookConfig, payload: bytes, cwd: Path) -> str | None:
     label = hook["label"]
+    if len(payload) > MAX_HOOK_INPUT_BYTES:
+        return f"{label} exceeded Hook input limit of {MAX_HOOK_INPUT_BYTES} bytes"
+
     spawn_options = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
         if os.name == "nt"
@@ -442,25 +487,35 @@ async def _run_command_hook(hook: HookConfig, payload: bytes, cwd: Path) -> str 
     except Exception as exc:
         return f"{label} failed to start: {exc}"
 
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    stdout_task = asyncio.create_task(read_limited(process.stdout, MAX_STDOUT_BYTES))
+    stderr_task = asyncio.create_task(read_limited(process.stderr, MAX_STDERR_BYTES))
+    stdin_task = asyncio.create_task(_write_payload(process.stdin, payload))
+    wait_task = asyncio.create_task(process.wait())
+    tasks = (stdout_task, stderr_task, stdin_task, wait_task)
+
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(payload),
-            timeout=hook["timeout_ms"] / 1000,
-        )
+        async with asyncio.timeout(hook["timeout_ms"] / 1000):
+            stdout, stderr, _, _ = await asyncio.gather(*tasks)
     except TimeoutError:
-        await _kill_and_reap(process)
+        await _abort_hook_tasks(process, tasks)
         return f"{label} timed out after {hook['timeout_ms']:g}ms"
+    except HookOutputLimitExceeded as exc:
+        await _abort_hook_tasks(process, tasks)
+        return f"{label} exceeded Hook output limit of {exc.limit} bytes"
     except asyncio.CancelledError:
-        await _kill_and_reap(process)
+        await _abort_hook_tasks(process, tasks)
         raise
+    except Exception as exc:
+        await _abort_hook_tasks(process, tasks)
+        return f"{label} failed during I/O: {exc}"
 
     if process.returncode != 0:
         detail = _decode_diagnostic(stderr)
         suffix = f": {detail}" if detail else ""
         return f"{label} exited with code {process.returncode}{suffix}"
-    if len(stdout) > MAX_HOOK_OUTPUT_BYTES:
-        return f"{label} produced more than {MAX_HOOK_OUTPUT_BYTES} bytes"
-
     try:
         result = json.loads(stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
