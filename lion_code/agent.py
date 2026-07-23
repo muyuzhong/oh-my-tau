@@ -74,6 +74,8 @@ from .skills import create_skill
 from .subagent import get_sub_agent_config
 from .mcp_client import McpManager
 from .hooks import HookOutcome, load_pre_tool_use_hooks, run_pre_tool_use_hooks
+from .tooling import ToolRegistry, ToolRuntime
+from .tooling.builtin import BUILTIN_TOOL_NAMES, create_builtin_tools
 
 # ─── 指数退避重试 ───────────────────────────────────────────
 
@@ -273,6 +275,15 @@ class Agent:
         # 记录文件读取时的 mtime，落实“先读后改”并检测外部并发修改。
         self._read_file_state: dict[str, float] = {}
 
+        # 普通工具通过每个 Agent 独享的 Registry 与 Runtime 执行；内部工具仍在本
+        # 阶段使用旧路由，避免一次改动跨越 PR 1 的兼容边界。
+        selected_tool_names = {tool["name"] for tool in self.tools}
+        self.tool_registry = ToolRegistry()
+        for tool in create_builtin_tools(self._read_file_state):
+            if tool.name in selected_tool_names:
+                self.tool_registry.register(tool)
+        self.tool_runtime = ToolRuntime(self.tool_registry)
+
         # MCP 延迟到首次对话初始化，避免仅查看 --help 也启动外部进程。
         self._mcp_manager = McpManager()
         self._mcp_initialized = False
@@ -444,6 +455,22 @@ class Agent:
 
     def get_token_usage(self) -> dict:
         return {"input": self.total_input_tokens, "output": self.total_output_tokens}
+
+    def _active_anthropic_tools(self) -> list[dict]:
+        """按当前兼容顺序生成 Schema，普通工具以 Registry 为事实来源。"""
+        active_builtins = {
+            tool.name: tool.to_anthropic_schema()
+            for tool in self.tool_registry.active_tools()
+        }
+        schemas: list[dict] = []
+        for schema in get_active_tool_definitions(self.tools):
+            name = schema["name"]
+            if name in BUILTIN_TOOL_NAMES:
+                if name in active_builtins:
+                    schemas.append(active_builtins[name])
+                continue
+            schemas.append(schema)
+        return schemas
 
     # ─── 主对话入口 ──────────────────────────────────────────
 
@@ -1229,7 +1256,12 @@ class Agent:
 
     # ─── 工具路由（含 Agent、Skill 与 Plan 内部工具）────────
 
-    async def _execute_tool_call(self, name: str, inp: dict) -> str:
+    async def _execute_tool_call(
+        self,
+        name: str,
+        inp: dict,
+        tool_call_id: str = "",
+    ) -> str:
         hook_chain = await run_pre_tool_use_hooks(
             self._pre_tool_use_hooks,
             name,
@@ -1270,7 +1302,14 @@ class Agent:
         # MCP 前缀工具交给连接管理器解析 Server 与实际工具名。
         if self._mcp_manager.is_mcp_tool(name):
             return await self._mcp_manager.call_tool(name, inp)
-        return await execute_tool(name, inp, self._read_file_state)
+        if name == "tool_search":
+            return await execute_tool(name, inp, self._read_file_state)
+        result = await self.tool_runtime.execute(
+            tool_call_id=tool_call_id,
+            name=name,
+            arguments=inp,
+        )
+        return result.content
 
     # ─── Skill fork 模式 ─────────────────────────────────────
 
@@ -1560,7 +1599,13 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 if block["name"] in CONCURRENCY_SAFE_TOOLS:
                     perm = check_permission(block["name"], block["input"], self.permission_mode, self._plan_file_path)
                     if perm["action"] == "allow":
-                        task = asyncio.create_task(self._execute_tool_call(block["name"], block["input"]))
+                        task = asyncio.create_task(
+                            self._execute_tool_call(
+                                block["name"],
+                                block["input"],
+                                block["id"],
+                            )
+                        )
                         early_executions[block["id"]] = task
 
             response = await self._call_anthropic_stream(on_tool_block_complete=_on_tool_block)
@@ -1647,7 +1692,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                         if cacheable:
                             self._confirmed_paths.add(perm["message"])
 
-                raw = await self._execute_tool_call(tu.name, inp)
+                raw = await self._execute_tool_call(tu.name, inp, tu.id)
                 res = self._persist_large_result(tu.name, raw)
                 print_tool_result(tu.name, res)
 
@@ -1684,7 +1729,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 "model": self.model,
                 "max_tokens": max_output if self._thinking_mode != "disabled" else 16384,
                 "system": self._build_anthropic_system(),
-                "tools": get_active_tool_definitions(self.tools),
+                "tools": self._active_anthropic_tools(),
                 # 滚动缓存边界只施加在消息副本，持久历史不混入 cache_control 元数据。
                 "messages": self._with_cache_breakpoints(self._anthropic_messages),
             }
@@ -1866,7 +1911,11 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
                 if batch["concurrent"]:
                     async def _run_oai_safe(ct_item: dict) -> tuple[dict, str]:
-                        raw = await self._execute_tool_call(ct_item["fn"], ct_item["inp"])
+                        raw = await self._execute_tool_call(
+                            ct_item["fn"],
+                            ct_item["inp"],
+                            ct_item["tc"]["id"],
+                        )
                         res = self._persist_large_result(ct_item["fn"], raw)
                         print_tool_result(ct_item["fn"], res)
                         return ct_item, res
@@ -1879,7 +1928,11 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                         if not ct["allowed"]:
                             self._openai_messages.append({"role": "tool", "tool_call_id": ct["tc"]["id"], "content": ct["result"]})
                             continue
-                        raw = await self._execute_tool_call(ct["fn"], ct["inp"])
+                        raw = await self._execute_tool_call(
+                            ct["fn"],
+                            ct["inp"],
+                            ct["tc"]["id"],
+                        )
                         res = self._persist_large_result(ct["fn"], raw)
                         print_tool_result(ct["fn"], res)
 
@@ -1898,7 +1951,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             stream = await self._openai_client.chat.completions.create(
                 model=self.model,
                 max_tokens=16384,
-                tools=_to_openai_tools(get_active_tool_definitions(self.tools)),
+                tools=_to_openai_tools(self._active_anthropic_tools()),
                 messages=self._openai_messages,
                 stream=True,
                 stream_options={"include_usage": True},
