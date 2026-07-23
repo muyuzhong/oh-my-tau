@@ -14,8 +14,19 @@ import asyncio
 import json
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredMcpTool:
+    """MCP Server 暴露的远端工具描述。"""
+
+    server_name: str
+    remote_name: str
+    description: str
+    input_schema: dict
 
 
 # ─── 单个 MCP 连接（每个 Server 一个）──────────────────────
@@ -99,18 +110,22 @@ class McpConnection:
         })
         self._send_notification("notifications/initialized")
 
-    async def list_tools(self) -> list[dict]:
+    async def list_tools(self) -> list[DiscoveredMcpTool]:
         """发现当前 Server 提供的工具。"""
         result = await self._send_request("tools/list")
         if not result or not isinstance(result.get("tools"), list):
             return []
         return [
-            {
-                "name": t["name"],
-                "description": t.get("description", ""),
-                "inputSchema": t.get("inputSchema"),
-                "serverName": self.server_name,
-            }
+            DiscoveredMcpTool(
+                server_name=self.server_name,
+                remote_name=str(t["name"]),
+                description=str(t.get("description", "")),
+                input_schema=(
+                    t["inputSchema"]
+                    if isinstance(t.get("inputSchema"), dict)
+                    else {"type": "object", "properties": {}}
+                ),
+            )
             for t in result["tools"]
         ]
 
@@ -149,7 +164,7 @@ class McpManager:
 
     def __init__(self):
         self._connections: dict[str, McpConnection] = {}
-        self._tools: list[dict] = []
+        self._tools: list[DiscoveredMcpTool] = []
         self._connected = False
 
     async def load_and_connect(self) -> None:
@@ -182,33 +197,47 @@ class McpManager:
                 print(f"[mcp] Failed to connect to '{name}': {e}", flush=True)
                 conn.close()
 
-    def get_tool_definitions(self) -> list[dict]:
-        """返回 Anthropic API 格式、带 `mcp__` 前缀的工具定义。"""
-        return [
-            {
-                "name": f"mcp__{t['serverName']}__{t['name']}",
-                "description": t.get("description") or f"MCP tool {t['name']} from {t['serverName']}",
-                "input_schema": t.get("inputSchema") or {"type": "object", "properties": {}},
-            }
-            for t in self._tools
-        ]
+    async def discover_tools(self) -> list[DiscoveredMcpTool]:
+        """连接尚未初始化时完成初始化，并返回已发现工具的稳定描述。"""
+        await self.load_and_connect()
+        return list(self._tools)
 
-    def is_mcp_tool(self, name: str) -> bool:
-        """判断工具名是否使用 MCP 前缀。"""
-        return name.startswith("mcp__")
-
-    async def call_tool(self, prefixed_name: str, args: dict) -> str:
-        """根据前缀把工具调用路由到正确的 Server。"""
-        parts = prefixed_name.split("__")
-        if len(parts) < 3:
-            raise ValueError(f"Invalid MCP tool name: {prefixed_name}")
-        server_name = parts[1]
-        # 工具名本身可能包含 `__`，只能切出 Server 段后再拼回剩余部分。
-        tool_name = "__".join(parts[2:])
+    async def call_remote_tool(
+        self,
+        *,
+        server_name: str,
+        tool_name: str,
+        arguments: dict,
+    ) -> str:
+        """调用指定 Server 的远端工具，不解析公共名称。"""
         conn = self._connections.get(server_name)
         if not conn:
             raise RuntimeError(f"MCP server '{server_name}' not connected")
-        return await conn.call_tool(tool_name, args)
+        return await conn.call_tool(tool_name, arguments)
+
+    def get_tool_definitions(self) -> list[dict]:
+        """Deprecated：返回旧版 Anthropic Schema，供迁移期调用方使用。"""
+        return [
+            {
+                "name": f"mcp__{tool.server_name}__{tool.remote_name}",
+                "description": tool.description
+                or f"MCP tool {tool.remote_name} from {tool.server_name}",
+                "input_schema": tool.input_schema,
+            }
+            for tool in self._tools
+        ]
+
+    async def call_tool(self, prefixed_name: str, args: dict) -> str:
+        """Deprecated：解析旧版公共名称并转发到显式远端调用接口。"""
+        parts = prefixed_name.split("__")
+        if len(parts) < 3:
+            raise ValueError(f"Invalid MCP tool name: {prefixed_name}")
+        # 工具名本身可能包含 `__`，只能切出 Server 段后再拼回剩余部分。
+        return await self.call_remote_tool(
+            server_name=parts[1],
+            tool_name="__".join(parts[2:]),
+            arguments=args,
+        )
 
     async def disconnect_all(self) -> None:
         """断开全部 Server 并清空已发现的工具。"""
