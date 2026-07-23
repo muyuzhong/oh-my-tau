@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import fnmatch
-import json
 import os
 import re
 import subprocess
@@ -19,12 +18,6 @@ from .frontmatter import parse_frontmatter
 # ─── 权限模式 ───────────────────────────────────────────────
 
 PermissionMode = str  # 可用值由 CLI 的权限模式选项约束。
-
-READ_TOOLS = {"read_file", "list_files", "grep_search", "web_fetch"}
-EDIT_TOOLS = {"write_file", "edit_file"}
-
-# 只有无副作用的只读工具可并行，避免多个工具相互观察到中间状态。
-CONCURRENCY_SAFE_TOOLS = {"read_file", "list_files", "grep_search", "web_fetch"}
 
 IS_WIN = sys.platform == "win32"
 
@@ -336,107 +329,23 @@ def _web_fetch(inp: dict) -> str:
     return text or "(empty response)"
 
 
-# ─── 危险命令模式 ───────────────────────────────────────────
+# ─── 兼容权限与结果入口 ──────────────────────────────────────
 
-DANGEROUS_PATTERNS = [
-    re.compile(r"\brm\s"),
-    re.compile(r"\bgit\s+(push|reset|clean|checkout\s+\.)"),
-    re.compile(r"\bsudo\b"),
-    re.compile(r"\bmkfs\b"),
-    re.compile(r"\bdd\s"),
-    re.compile(r">\s*/dev/"),
-    re.compile(r"\bkill\b"),
-    re.compile(r"\bpkill\b"),
-    re.compile(r"\breboot\b"),
-    re.compile(r"\bshutdown\b"),
-    re.compile(r"\bdel\s", re.IGNORECASE),
-    re.compile(r"\brmdir\s", re.IGNORECASE),
-    re.compile(r"\bformat\s", re.IGNORECASE),
-    re.compile(r"\btaskkill\s", re.IGNORECASE),
-    re.compile(r"\bRemove-Item\s", re.IGNORECASE),
-    re.compile(r"\bStop-Process\s", re.IGNORECASE),
-]
-
-
-def is_dangerous(command: str) -> bool:
-    return any(p.search(command) for p in DANGEROUS_PATTERNS)
-
-
-# ─── 权限规则（.claude/settings.json）───────────────────────
-
-
-def _parse_rule(rule: str) -> dict:
-    m = re.match(r"^([a-z_]+)\((.+)\)$", rule)
-    if m:
-        return {"tool": m.group(1), "pattern": m.group(2)}
-    return {"tool": rule, "pattern": None}
-
-
-def _load_settings(file_path: Path) -> dict | None:
-    if not file_path.exists():
-        return None
-    try:
-        return json.loads(file_path.read_text())
-    except Exception:
-        return None
-
-
-_cached_rules: dict | None = None
+from .tooling.permission import (  # noqa: E402
+    PermissionPolicy,
+    is_dangerous,
+    load_permission_rules as _load_permission_rules,
+    reset_permission_cache,
+)
+from .tooling.result_store import (  # noqa: E402
+    MAX_RESULT_CHARS,
+    truncate_result as _truncate_result,
+)
 
 
 def load_permission_rules() -> dict:
-    global _cached_rules
-    if _cached_rules is not None:
-        return _cached_rules
-
-    allow: list[dict] = []
-    deny: list[dict] = []
-
-    user_settings = _load_settings(Path.home() / ".claude" / "settings.json")
-    project_settings = _load_settings(Path.cwd() / ".claude" / "settings.json")
-
-    for settings in [user_settings, project_settings]:
-        if not settings or "permissions" not in settings:
-            continue
-        perms = settings["permissions"]
-        for r in perms.get("allow", []):
-            allow.append(_parse_rule(r))
-        for r in perms.get("deny", []):
-            deny.append(_parse_rule(r))
-
-    _cached_rules = {"allow": allow, "deny": deny}
-    return _cached_rules
-
-
-def _matches_rule(rule: dict, tool_name: str, inp: dict) -> bool:
-    if rule["tool"] != tool_name:
-        return False
-    if rule["pattern"] is None:
-        return True
-
-    value = ""
-    if tool_name == "run_shell":
-        value = inp.get("command", "")
-    elif "file_path" in inp:
-        value = inp["file_path"]
-    else:
-        return True
-
-    pattern = rule["pattern"]
-    if pattern.endswith("*"):
-        return value.startswith(pattern[:-1])
-    return value == pattern
-
-
-def _check_permission_rules(tool_name: str, inp: dict) -> str | None:
-    rules = load_permission_rules()
-    for rule in rules["deny"]:
-        if _matches_rule(rule, tool_name, inp):
-            return "deny"
-    for rule in rules["allow"]:
-        if _matches_rule(rule, tool_name, inp):
-            return "allow"
-    return None
+    """Deprecated：转发到 tooling.permission。"""
+    return _load_permission_rules(Path.home(), Path.cwd())
 
 
 def check_permission(
@@ -445,73 +354,30 @@ def check_permission(
     mode: str = "default",
     plan_file_path: str | None = None,
 ) -> dict:
-    """返回 allow、deny 或 confirm；显式 deny 与 Plan 只读约束优先级最高。"""
-    # deny 是权限硬边界，即使 bypassPermissions（--yolo）也不能越过，
-    # 所以必须在所有模式快捷路径之前检查。
-    rule_result = _check_permission_rules(tool_name, inp)
-    if rule_result == "deny":
-        return {"action": "deny", "message": f"Denied by permission rule for {tool_name}"}
+    """Deprecated：按统一工具 Capability 返回旧字典格式的权限决定。"""
+    from .tooling.builtin import create_builtin_tools
+    from .tooling.internal import create_internal_tools
 
-    # Plan 模式的只读契约高于 allow 和 bypass：仅计划文件可写，Shell 始终禁用。
-    if mode == "plan":
-        if tool_name in EDIT_TOOLS:
-            file_path = inp.get("file_path") or inp.get("path")
-            if plan_file_path and file_path == plan_file_path:
-                return {"action": "allow"}
-            return {"action": "deny", "message": f"Blocked in plan mode: {tool_name}"}
-        if tool_name == "run_shell":
-            return {"action": "deny", "message": "Shell commands blocked in plan mode"}
-
-    if mode == "bypassPermissions":
-        return {"action": "allow"}
-
-    if rule_result == "allow":
-        return {"action": "allow"}
-
-    if tool_name in READ_TOOLS:
-        return {"action": "allow"}
-
-    if tool_name in ("enter_plan_mode", "exit_plan_mode"):
-        return {"action": "allow"}
-
-    if mode == "acceptEdits" and tool_name in EDIT_TOOLS:
-        return {"action": "allow"}
-
-    needs_confirm = False
-    confirm_message = ""
-
-    if tool_name == "run_shell" and is_dangerous(inp.get("command", "")):
-        needs_confirm = True
-        confirm_message = inp.get("command", "")
-    elif tool_name == "write_file" and not Path(inp.get("file_path", "")).exists():
-        needs_confirm = True
-        confirm_message = f"write new file: {inp.get('file_path', '')}"
-    elif tool_name == "edit_file" and not Path(inp.get("file_path", "")).exists():
-        needs_confirm = True
-        confirm_message = f"edit non-existent file: {inp.get('file_path', '')}"
-
-    if needs_confirm:
-        if mode == "dontAsk":
-            return {"action": "deny", "message": f"Auto-denied (dontAsk mode): {confirm_message}"}
-        return {"action": "confirm", "message": confirm_message}
-
-    return {"action": "allow"}
-
-
-# ─── 长工具结果截断 ─────────────────────────────────────────
-
-MAX_RESULT_CHARS = 50000
-
-
-def _truncate_result(result: str) -> str:
-    if len(result) <= MAX_RESULT_CHARS:
-        return result
-    keep_each = (MAX_RESULT_CHARS - 60) // 2
-    return (
-        result[:keep_each]
-        + f"\n\n[... truncated {len(result) - keep_each * 2} chars ...]\n\n"
-        + result[-keep_each:]
+    tool = next(
+        (
+            candidate
+            for candidate in [*create_builtin_tools(), *create_internal_tools()]
+            if candidate.name == tool_name
+        ),
+        None,
     )
+    if tool is None:
+        return {"action": "allow"}
+    decision = PermissionPolicy().check(
+        tool=tool,
+        arguments=inp,
+        mode=mode,
+        plan_file_path=plan_file_path,
+    )
+    result = {"action": decision.action}
+    if decision.message:
+        result["message"] = decision.message
+    return result
 
 
 # ─── 工具调用入口 ───────────────────────────────────────────
@@ -566,11 +432,6 @@ async def execute_tool(
             pass
 
     return result
-
-
-def reset_permission_cache() -> None:
-    global _cached_rules
-    _cached_rules = None
 
 
 # 保留旧导入入口，但普通工具 Schema 的唯一事实来源是 LionTool。

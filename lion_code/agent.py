@@ -18,12 +18,8 @@ import openai
 
 from .tools import (
     tool_definitions,
-    execute_tool,
-    check_permission,
-    CONCURRENCY_SAFE_TOOLS,
     ToolDef,
     PermissionMode,
-    _truncate_result,
 )
 from .memory import (
     start_memory_prefetch,
@@ -46,7 +42,6 @@ from .autonomy import (
     LOOP_MAX_ITERATIONS,
     load_auto_mode_rules,
     build_classifier_system,
-    AUTO_MODE_FAST_PATH_TOOLS,
     DENIAL_LIMITS,
     build_classifier_transcript,
     parse_block_verdict,
@@ -72,7 +67,7 @@ from .prompt import build_system_prompt, build_static_system_prompt, build_dynam
 from .skills import create_skill
 from .subagent import get_sub_agent_config
 from .mcp_client import McpManager
-from .hooks import HookOutcome, load_pre_tool_use_hooks, run_pre_tool_use_hooks
+from .hooks import load_pre_tool_use_hooks
 from .tooling import ToolRegistry, ToolResult, ToolRuntime
 from .tooling.builtin import create_builtin_tools
 from .tooling.context import ToolContext
@@ -81,6 +76,17 @@ from .tooling.internal import (
     create_legacy_mcp_tool,
     create_schedule_wakeup_tool,
 )
+from .tooling.middleware import (
+    AuditMiddleware,
+    CancellationMiddleware,
+    PermissionMiddleware,
+    PreToolHookMiddleware,
+    ReadFreshnessMiddleware,
+    ResultPolicyMiddleware,
+    is_auto_fast_path,
+)
+from .tooling.permission import PermissionPolicy
+from .tooling.result_store import ResultStore
 from .tooling.types import JSONValue
 
 # ─── 指数退避重试 ───────────────────────────────────────────
@@ -174,7 +180,6 @@ def _to_openai_tools(tools: list[ToolDef]) -> list[dict]:
 
 # ─── 多级上下文压缩参数 ─────────────────────────────────────
 
-SNIPPABLE_TOOLS = {"read_file", "grep_search", "list_files", "run_shell"}
 SNIP_PLACEHOLDER = "[Content snipped - re-read if needed]"
 SNIP_THRESHOLD = 0.60
 # 利用率超过此值时，即使缓存仍热也执行 snip；此时避免上下文溢出比保住缓存更重要。
@@ -281,7 +286,7 @@ class Agent:
         # 阶段使用旧路由，避免一次改动跨越 PR 1 的兼容边界。
         selected_tool_names = {tool["name"] for tool in self.tools}
         self.tool_registry = ToolRegistry()
-        for tool in create_builtin_tools(self._read_file_state):
+        for tool in create_builtin_tools():
             if tool.name in selected_tool_names:
                 self.tool_registry.register(tool)
         for tool in create_internal_tools():
@@ -296,8 +301,26 @@ class Agent:
             plan_file_path=self._plan_file_path,
             read_file_state=self._read_file_state,
             confirm_fn=self._confirm_dangerous,
+            hooks=self._pre_tool_use_hooks,
+            confirm_hook_trust=self._confirm_hook_trust,
+            auto_permission_fn=self._classify_tool_call,
+            confirmed_paths=self._confirmed_paths,
+            cancellation_fn=lambda: self._aborted,
         )
-        self.tool_runtime = ToolRuntime(self.tool_registry, self.tool_context)
+        self._permission_policy = PermissionPolicy(cwd=self.tool_context.cwd)
+        self._result_store = ResultStore()
+        self.tool_runtime = ToolRuntime(
+            self.tool_registry,
+            self.tool_context,
+            [
+                CancellationMiddleware(),
+                PreToolHookMiddleware(),
+                PermissionMiddleware(self._permission_policy),
+                ReadFreshnessMiddleware(),
+                ResultPolicyMiddleware(self._result_store),
+                AuditMiddleware(),
+            ],
+        )
 
         # MCP 延迟到首次对话初始化，避免仅查看 --help 也启动外部进程。
         self._mcp_manager = McpManager()
@@ -940,13 +963,13 @@ class Agent:
         第一阶段是低成本激进门，只要规则可能适用就拦截；若放行则一次调用结束。
         被拦截后第二阶段结合用户意图谨慎复核，其结论为最终结果。
         """
-        # 先执行静态 deny 硬边界，Auto Mode 也不能绕过。
-        base = check_permission(tool_name, inp, "default", self._plan_file_path)
-        if base["action"] == "deny":
-            return base
-        # 无副作用的只读工具直接放行，避免无意义的分类器成本。
-        if tool_name in AUTO_MODE_FAST_PATH_TOOLS:
-            return {"action": "allow"}
+        # 直接调用此兼容方法时也按 Capability 跳过无副作用只读工具；显式 deny 和
+        # Plan 硬边界统一由 PermissionMiddleware 在进入分类器前执行。
+        try:
+            if is_auto_fast_path(self.tool_registry.resolve(tool_name)):
+                return {"action": "allow"}
+        except LookupError:
+            pass
 
         if not self._anthropic_client and not self._openai_client:
             # 没有可用模型时 fail-closed：交互环境转人工，headless 直接拒绝。
@@ -1152,7 +1175,7 @@ class Agent:
                 if isinstance(block, dict) and block.get("type") == "tool_result" and isinstance(block.get("content"), str) and block["content"] != SNIP_PLACEHOLDER:
                     tool_use_id = block.get("tool_use_id")
                     tool_info = self._find_tool_use_by_id(tool_use_id)
-                    if tool_info and tool_info["name"] in SNIPPABLE_TOOLS:
+                    if tool_info and self._is_snippable_tool(tool_info["name"]):
                         results.append({"mi": mi, "bi": bi, "name": tool_info["name"], "file_path": tool_info.get("input", {}).get("file_path")})
 
         if len(results) <= KEEP_RECENT_RESULTS:
@@ -1187,8 +1210,14 @@ class Agent:
             return
         tool_msgs = []
         for i, msg in enumerate(self._openai_messages):
-            if msg.get("role") == "tool" and isinstance(msg.get("content"), str) and msg["content"] != SNIP_PLACEHOLDER:
-                tool_msgs.append(i)
+            if (
+                msg.get("role") == "tool"
+                and isinstance(msg.get("content"), str)
+                and msg["content"] != SNIP_PLACEHOLDER
+            ):
+                name = self._find_openai_tool_name_by_id(msg.get("tool_call_id"))
+                if name and self._is_snippable_tool(name):
+                    tool_msgs.append(i)
         if len(tool_msgs) <= KEEP_RECENT_RESULTS:
             return
         snip_count = len(tool_msgs) - KEEP_RECENT_RESULTS
@@ -1231,33 +1260,38 @@ class Agent:
                     return {"name": block["name"], "input": block.get("input", {})}
         return None
 
+    def _find_openai_tool_name_by_id(self, tool_call_id: str | None) -> str | None:
+        if not tool_call_id:
+            return None
+        for message in self._openai_messages:
+            if message.get("role") != "assistant":
+                continue
+            for call in message.get("tool_calls") or []:
+                if call.get("id") == tool_call_id:
+                    return call.get("function", {}).get("name")
+        return None
+
+    def _is_snippable_tool(self, name: str) -> bool:
+        try:
+            tool = self.tool_registry.resolve(name)
+        except LookupError:
+            return False
+        return tool.capabilities.result_policy == "snippable"
+
     # ─── 大结果持久化 ────────────────────────────────────────
     # 工具结果超过 30 KB 时先完整落盘，再用预览和文件路径替换上下文内容；
     # 模型仍可通过 read_file 取回全文。
 
     def _persist_large_result(self, tool_name: str, result: str) -> str:
-        THRESHOLD = 30 * 1024  # 与上下文预览策略约定的落盘阈值。
-        if len(result.encode()) <= THRESHOLD:
+        """Deprecated：兼容基准脚本；正常执行由 ResultPolicyMiddleware 处理。"""
+        try:
+            tool = self.tool_registry.resolve(tool_name)
+        except LookupError:
             return result
-        d = Path.home() / ".lion-code" / "tool-results"
-        d.mkdir(parents=True, exist_ok=True)
-        # 并行工具可能在同一毫秒落盘，UUID 后缀可防止仅用时间戳造成相互覆盖。
-        filename = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}-{tool_name}.txt"
-        filepath = d / filename
-        filepath.write_text(result, encoding="utf-8")
-
-        lines = result.split("\n")
-        preview = "\n".join(lines[:200])
-        size_kb = len(result.encode()) / 1024
-
-        # 必须先持久化再截断；此处截断只防御单行数百 KB 等异常预览，不能影响完整数据
-        # 落盘。顺序要求见 issue #6。
-        return _truncate_result(
-            f"[Result too large ({size_kb:.1f} KB, {len(lines)} lines). "
-            f"Full output saved to {filepath}. "
-            f"You can use read_file to see the full result.]\n\n"
-            f"Preview (first 200 lines):\n{preview}"
-        )
+        return self._result_store.process(
+            tool,
+            ToolResult(content=result),
+        ).content
 
     # ─── 工具路由（含 Agent、Skill 与 Plan 内部工具）────────
 
@@ -1267,31 +1301,6 @@ class Agent:
         inp: dict,
         tool_call_id: str = "",
     ) -> str:
-        hook_chain = await run_pre_tool_use_hooks(
-            self._pre_tool_use_hooks,
-            name,
-            inp,
-            confirm_trust=self._confirm_hook_trust,
-        )
-        if hook_chain.outcome is not HookOutcome.ALLOW:
-            terminal = hook_chain.terminal_result
-            if terminal is None:
-                return (
-                    "Tool call blocked because the hook system returned an invalid result.\n\n"
-                    "The hook system failed. Do not interpret this as user intent."
-                )
-            reason = terminal.reason or "No reason was provided."
-            if terminal.outcome is HookOutcome.DENY:
-                return (
-                    f'Action denied by hook "{terminal.hook_id}":\n{reason}\n\n'
-                    "A configured policy rejected this action. Adjust the action."
-                )
-            return (
-                f'Tool call blocked because hook "{terminal.hook_id}" failed:\n'
-                f"{reason}\n\n"
-                "The hook system failed. Do not interpret this as user intent."
-            )
-
         self.tool_context.permission_mode = self.permission_mode
         self.tool_context.plan_file_path = self._plan_file_path
         result = await self.tool_runtime.execute(
@@ -1615,21 +1624,24 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
             early_executions: dict[str, asyncio.Task] = {}
 
             def _on_tool_block(block: dict):
-                # Auto Mode 只能提前启动免分类工具，否则 web_fetch 等虽可并发的动作
-                # 会在分类器审查前产生副作用。
-                if self.permission_mode == "auto" and block["name"] not in AUTO_MODE_FAST_PATH_TOOLS:
+                if not self.tool_runtime.can_run_parallel(block["name"]):
                     return
-                if block["name"] in CONCURRENCY_SAFE_TOOLS:
-                    perm = check_permission(block["name"], block["input"], self.permission_mode, self._plan_file_path)
-                    if perm["action"] == "allow":
-                        task = asyncio.create_task(
-                            self._execute_tool_call(
-                                block["name"],
-                                block["input"],
-                                block["id"],
-                            )
-                        )
-                        early_executions[block["id"]] = task
+                if self.permission_mode == "auto":
+                    try:
+                        if not is_auto_fast_path(
+                            self.tool_registry.resolve(block["name"])
+                        ):
+                            return
+                    except LookupError:
+                        return
+                task = asyncio.create_task(
+                    self._execute_tool_call(
+                        block["name"],
+                        block["input"],
+                        block["id"],
+                    )
+                )
+                early_executions[block["id"]] = task
 
             response = await self._call_anthropic_stream(on_tool_block_complete=_on_tool_block)
 
@@ -1688,35 +1700,12 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                 # 先复用流式阶段已经启动的任务，避免重复执行。
                 early_task = early_executions.get(tu.id)
                 if early_task:
-                    raw = await early_task
-                    res = self._persist_large_result(tu.name, raw)
+                    res = await early_task
                     print_tool_result(tu.name, res)
                     tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": res})
                     continue
 
-                # 未提前启动的工具在此判权；Auto Mode 走 transcript 分类器，其余走静态规则。
-                if self.permission_mode == "auto":
-                    perm = await self._classify_tool_call(tu.name, inp)
-                else:
-                    perm = check_permission(tu.name, inp, self.permission_mode, self._plan_file_path)
-                if perm["action"] == "deny":
-                    print_info(f"Denied: {perm.get('message', '')}")
-                    tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": f"Action denied: {perm.get('message', '')}"})
-                    continue
-                if perm["action"] == "confirm" and perm.get("message"):
-                    # Auto Mode 的 confirm 内容是原因而非具体路径，不能缓存；否则一次批准
-                    # 会错误放行所有具有相同原因的后续动作。
-                    cacheable = self.permission_mode != "auto"
-                    if not cacheable or perm["message"] not in self._confirmed_paths:
-                        confirmed = await self._confirm_dangerous(perm["message"])
-                        if not confirmed:
-                            tool_results.append({"type": "tool_result", "tool_use_id": tu.id, "content": "User denied this action."})
-                            continue
-                        if cacheable:
-                            self._confirmed_paths.add(perm["message"])
-
-                raw = await self._execute_tool_call(tu.name, inp, tu.id)
-                res = self._persist_large_result(tu.name, raw)
+                res = await self._execute_tool_call(tu.name, inp, tu.id)
                 print_tool_result(tu.name, res)
 
                 if self._context_cleared:
@@ -1883,7 +1872,7 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                         })
                 break
 
-            # 第一阶段串行解析并判权，确保任何工具都不会在授权前启动。
+            # 先串行解析调用；权限、Hook 与确认均由每个 Runtime 调用统一处理。
             oai_checked: list[dict] = []
             for tc in tool_calls:
                 if self._aborted:
@@ -1897,31 +1886,12 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                     inp = {}
 
                 print_tool_call(fn_name, inp)
-
-                if self.permission_mode == "auto":
-                    perm = await self._classify_tool_call(fn_name, inp)
-                else:
-                    perm = check_permission(fn_name, inp, self.permission_mode, self._plan_file_path)
-                if perm["action"] == "deny":
-                    print_info(f"Denied: {perm.get('message', '')}")
-                    oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False, "result": f"Action denied: {perm.get('message', '')}"})
-                    continue
-                if perm["action"] == "confirm" and perm.get("message"):
-                    # Auto Mode 的确认文本是原因而非具体资源，不能缓存为后续白名单。
-                    cacheable = self.permission_mode != "auto"
-                    if not cacheable or perm["message"] not in self._confirmed_paths:
-                        confirmed = await self._confirm_dangerous(perm["message"])
-                        if not confirmed:
-                            oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": False, "result": "User denied this action."})
-                            continue
-                        if cacheable:
-                            self._confirmed_paths.add(perm["message"])
-                oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp, "allowed": True})
+                oai_checked.append({"tc": tc, "fn": fn_name, "inp": inp})
 
             # 第二阶段按顺序分批执行；只有连续的无副作用工具可并行。
             oai_batches: list[dict] = []
             for ct in oai_checked:
-                safe = ct["allowed"] and ct["fn"] in CONCURRENCY_SAFE_TOOLS
+                safe = self.tool_runtime.can_run_parallel(ct["fn"])
                 if safe and oai_batches and oai_batches[-1]["concurrent"]:
                     oai_batches[-1]["items"].append(ct)
                 else:
@@ -1934,12 +1904,11 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
 
                 if batch["concurrent"]:
                     async def _run_oai_safe(ct_item: dict) -> tuple[dict, str]:
-                        raw = await self._execute_tool_call(
+                        res = await self._execute_tool_call(
                             ct_item["fn"],
                             ct_item["inp"],
                             ct_item["tc"]["id"],
                         )
-                        res = self._persist_large_result(ct_item["fn"], raw)
                         print_tool_result(ct_item["fn"], res)
                         return ct_item, res
 
@@ -1948,15 +1917,11 @@ IMPORTANT: When your plan is complete, you MUST call exit_plan_mode. Do NOT ask 
                         self._openai_messages.append({"role": "tool", "tool_call_id": ct_item["tc"]["id"], "content": res})
                 else:
                     for ct in batch["items"]:
-                        if not ct["allowed"]:
-                            self._openai_messages.append({"role": "tool", "tool_call_id": ct["tc"]["id"], "content": ct["result"]})
-                            continue
-                        raw = await self._execute_tool_call(
+                        res = await self._execute_tool_call(
                             ct["fn"],
                             ct["inp"],
                             ct["tc"]["id"],
                         )
-                        res = self._persist_large_result(ct["fn"], raw)
                         print_tool_result(ct["fn"], res)
 
                         if self._context_cleared:

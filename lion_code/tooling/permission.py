@@ -223,7 +223,10 @@ class PermissionPolicy:
             confirm_message = str(arguments.get("command", ""))
         elif capabilities.mutates_workspace and capabilities.requires_read_before_write:
             target = str(arguments.get("file_path", ""))
-            if target and not Path(target).exists():
+            target_path = Path(target)
+            if not target_path.is_absolute():
+                target_path = self.cwd / target_path
+            if target and not target_path.exists():
                 confirm_message = f"write new file: {target}"
 
         if confirm_message:

@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -26,6 +27,7 @@ from lion_code.hooks import (
     run_pre_tool_use_hooks,
     trust_project_hook,
 )
+from lion_code.tooling.types import ToolResult
 
 
 def _python_shell_command(script: Path) -> str:
@@ -660,10 +662,17 @@ class TestAgentHookIntegration(unittest.IsolatedAsyncioTestCase):
                 executed=(terminal,),
             )
         )
-        tool_runner = AsyncMock(return_value="executed")
-        with (
-            patch("lion_code.agent.run_pre_tool_use_hooks", hook_runner),
-            patch("lion_code.agent.execute_tool", tool_runner),
+        tool_runner = AsyncMock(return_value=ToolResult(content="executed"))
+        run_shell = agent.tool_registry.resolve("run_shell")
+        agent.tool_registry.register(
+            replace(run_shell, execute_fn=tool_runner),
+            replace=True,
+            activate=True,
+        )
+        agent.tool_context.hooks.append(object())
+        with patch(
+            "lion_code.tooling.middleware.run_pre_tool_use_hooks",
+            hook_runner,
         ):
             result = await agent._execute_tool_call("run_shell", {"command": "echo hi"})
 
@@ -694,10 +703,17 @@ class TestAgentHookIntegration(unittest.IsolatedAsyncioTestCase):
                 executed=(terminal,),
             )
         )
-        tool_runner = AsyncMock(return_value="executed")
-        with (
-            patch("lion_code.agent.run_pre_tool_use_hooks", hook_runner),
-            patch("lion_code.agent.execute_tool", tool_runner),
+        tool_runner = AsyncMock(return_value=ToolResult(content="executed"))
+        run_shell = agent.tool_registry.resolve("run_shell")
+        agent.tool_registry.register(
+            replace(run_shell, execute_fn=tool_runner),
+            replace=True,
+            activate=True,
+        )
+        agent.tool_context.hooks.append(object())
+        with patch(
+            "lion_code.tooling.middleware.run_pre_tool_use_hooks",
+            hook_runner,
         ):
             result = await agent._execute_tool_call("run_shell", {"command": "echo hi"})
 

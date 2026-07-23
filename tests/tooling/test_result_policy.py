@@ -4,7 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from lion_code.tooling.context import ToolContext
+from lion_code.tooling.middleware import ResultPolicyMiddleware
+from lion_code.tooling.registry import ToolRegistry
 from lion_code.tooling.result_store import ResultStore
+from lion_code.tooling.runtime import ToolRuntime
 from lion_code.tooling.types import LionTool, ToolCapabilities, ToolResult
 
 
@@ -23,7 +27,7 @@ def _tool(policy: str) -> LionTool:
     )
 
 
-class TestResultStore(unittest.TestCase):
+class TestResultStore(unittest.IsolatedAsyncioTestCase):
     def test_large_result_is_persisted_before_preview(self):
         original = "first\n" + "x" * 2_000 + "\nlast"
         with tempfile.TemporaryDirectory() as directory:
@@ -62,6 +66,52 @@ class TestResultStore(unittest.TestCase):
 
             self.assertIs(result, source)
             self.assertEqual(list(Path(directory).iterdir()), [])
+
+    async def test_runtime_applies_result_policy_before_returning(self):
+        original = "runtime" * 100
+
+        async def execute(_context, _tool_call_id, _arguments, _on_update):
+            return ToolResult(content=original)
+
+        tool = LionTool(
+            name="runtime_output",
+            label="runtime_output",
+            description="runtime output",
+            parameters={"type": "object", "properties": {}},
+            execute_fn=execute,
+            capabilities=ToolCapabilities(result_policy="persist_large"),
+        )
+        registry = ToolRegistry()
+        registry.register(tool)
+        context = ToolContext(
+            session_id="session",
+            cwd=Path.cwd(),
+            controller=object(),
+            registry=registry,
+            permission_mode="default",
+            plan_file_path=None,
+            read_file_state={},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = ToolRuntime(
+                registry,
+                context,
+                [ResultPolicyMiddleware(ResultStore(
+                    Path(directory),
+                    threshold_bytes=10,
+                ))],
+            )
+
+            result = await runtime.execute(
+                tool_call_id="call-1",
+                name="runtime_output",
+                arguments={},
+            )
+
+            self.assertEqual(
+                Path(str(result.details["persisted_path"])).read_text(encoding="utf-8"),
+                original,
+            )
 
 
 if __name__ == "__main__":

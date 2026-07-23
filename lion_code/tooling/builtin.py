@@ -55,22 +55,11 @@ def wrap_legacy_tool(
     )
 
 
-def create_builtin_tools(
-    read_file_state: dict[str, float] | None = None,
-) -> list[LionTool]:
+def create_builtin_tools() -> list[LionTool]:
     """创建文件、搜索、Shell 与网页工具的统一定义。"""
     # 延迟导入允许 tools.py 在模块加载末尾从本对象反向生成兼容 Schema，避免循环
     # 导入时读取尚未初始化完成的 create_builtin_tools。
     from .. import tools as legacy_tools
-
-    def legacy_handler(name: str) -> Callable[[dict], object]:
-        # PR 1 仍复用旧执行入口以保持先读后写与 mtime 行为；PR 3 会把这部分迁入
-        # Middleware，工具对象本身无需再次变化。
-        return lambda arguments: legacy_tools.execute_tool(
-            name,
-            arguments,
-            read_file_state,
-        )
 
     return [
         wrap_legacy_tool(
@@ -86,11 +75,12 @@ def create_builtin_tools(
                 },
                 "required": ["file_path"],
             },
-            handler=legacy_handler("read_file"),
+            handler=legacy_tools._read_file,
             capabilities=ToolCapabilities(
                 read_only=True,
                 concurrency_safe=True,
                 allowed_in_plan=True,
+                tracks_read_freshness=True,
                 result_policy="snippable",
             ),
         ),
@@ -111,8 +101,11 @@ def create_builtin_tools(
                 },
                 "required": ["file_path", "content"],
             },
-            handler=legacy_handler("write_file"),
-            capabilities=ToolCapabilities(requires_read_before_write=True),
+            handler=legacy_tools._write_file,
+            capabilities=ToolCapabilities(
+                mutates_workspace=True,
+                requires_read_before_write=True,
+            ),
         ),
         wrap_legacy_tool(
             name="edit_file",
@@ -135,8 +128,11 @@ def create_builtin_tools(
                 },
                 "required": ["file_path", "old_string", "new_string"],
             },
-            handler=legacy_handler("edit_file"),
-            capabilities=ToolCapabilities(requires_read_before_write=True),
+            handler=legacy_tools._edit_file,
+            capabilities=ToolCapabilities(
+                mutates_workspace=True,
+                requires_read_before_write=True,
+            ),
         ),
         wrap_legacy_tool(
             name="list_files",
@@ -155,7 +151,7 @@ def create_builtin_tools(
                 },
                 "required": ["pattern"],
             },
-            handler=legacy_handler("list_files"),
+            handler=legacy_tools._list_files,
             capabilities=ToolCapabilities(
                 read_only=True,
                 concurrency_safe=True,
@@ -184,7 +180,7 @@ def create_builtin_tools(
                 },
                 "required": ["pattern"],
             },
-            handler=legacy_handler("grep_search"),
+            handler=legacy_tools._grep_search,
             capabilities=ToolCapabilities(
                 read_only=True,
                 concurrency_safe=True,
@@ -209,8 +205,11 @@ def create_builtin_tools(
                 },
                 "required": ["command"],
             },
-            handler=legacy_handler("run_shell"),
-            capabilities=ToolCapabilities(result_policy="snippable"),
+            handler=legacy_tools._run_shell,
+            capabilities=ToolCapabilities(
+                executes_process=True,
+                result_policy="snippable",
+            ),
         ),
         wrap_legacy_tool(
             name="web_fetch",
@@ -226,11 +225,13 @@ def create_builtin_tools(
                 },
                 "required": ["url"],
             },
-            handler=legacy_handler("web_fetch"),
+            handler=legacy_tools._web_fetch,
             capabilities=ToolCapabilities(
                 read_only=True,
+                external_side_effect=True,
                 concurrency_safe=True,
                 allowed_in_plan=True,
+                result_policy="persist_large",
             ),
         ),
     ]

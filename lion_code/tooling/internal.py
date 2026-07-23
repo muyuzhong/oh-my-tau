@@ -38,7 +38,10 @@ def create_agent_tool() -> LionTool:
             "required": ["description", "prompt"],
         },
         execute_fn=execute,
-        capabilities=ToolCapabilities(allowed_in_plan=True),
+        capabilities=ToolCapabilities(
+            allowed_in_plan=True,
+            result_policy="persist_large",
+        ),
     )
 
 
@@ -66,7 +69,10 @@ def create_skill_tool() -> LionTool:
             "required": ["skill_name"],
         },
         execute_fn=execute,
-        capabilities=ToolCapabilities(allowed_in_plan=True),
+        capabilities=ToolCapabilities(
+            allowed_in_plan=True,
+            result_policy="persist_large",
+        ),
     )
 
 
@@ -218,4 +224,5 @@ def create_legacy_mcp_tool(manager: Any, schema: Mapping[str, Any]) -> LionTool:
         description=str(schema.get("description", "")),
         parameters=dict(schema.get("input_schema", {})),
         execute_fn=execute,
+        capabilities=ToolCapabilities(result_policy="persist_large"),
     )

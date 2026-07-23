@@ -253,13 +253,6 @@ def build_classifier_system(rules: dict) -> str:
     ])
 
 
-# 只读且无副作用的工具可跳过分类器。write_file/edit_file 明确排除；web_fetch
-# 也不进入快路径，因为外部请求可能携带数据离开本机。
-AUTO_MODE_FAST_PATH_TOOLS = {
-    "read_file", "list_files", "grep_search", "tool_search",
-    "enter_plan_mode", "exit_plan_mode",
-}
-
 # 连续或累计拒绝达到上限，说明分类器可能陷入拒绝循环；此时转交人工确认，
 # headless 环境则终止。常量取自 auto-mode-reverse-engineering.md §8。
 DENIAL_LIMITS = {"max_consecutive": 3, "max_total": 20}

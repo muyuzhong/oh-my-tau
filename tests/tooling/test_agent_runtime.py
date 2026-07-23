@@ -86,6 +86,14 @@ class TestAgentBuiltinRuntime(unittest.IsolatedAsyncioTestCase):
             ["read_file"],
         )
 
+    def test_context_snipping_uses_registry_result_policy(self):
+        agent = self._agent()
+
+        self.assertTrue(agent._is_snippable_tool("read_file"))
+        self.assertTrue(agent._is_snippable_tool("run_shell"))
+        self.assertFalse(agent._is_snippable_tool("web_fetch"))
+        self.assertFalse(agent._is_snippable_tool("missing"))
+
 
 if __name__ == "__main__":
     unittest.main()
