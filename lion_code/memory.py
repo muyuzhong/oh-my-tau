@@ -67,14 +67,15 @@ def _slugify(text: str) -> str:
 # ─── 增删改查 ───────────────────────────────────────────────
 
 
-def list_memories() -> list[MemoryEntry]:
-    d = get_memory_dir()
+def list_memories(memory_dir: Path | None = None) -> list[MemoryEntry]:
+    """按更新时间列出指定目录的有效 Memory；省略目录时使用当前项目。"""
+    d = memory_dir or get_memory_dir()
     entries: list[MemoryEntry] = []
     for f in sorted(d.glob("*.md")):
         if f.name == "MEMORY.md":
             continue
         try:
-            result = parse_frontmatter(f.read_text())
+            result = parse_frontmatter(f.read_text(encoding="utf-8", errors="replace"))
             meta = result.meta
             if not meta.get("name") or not meta.get("type"):
                 continue
@@ -97,7 +98,7 @@ def save_memory(name: str, description: str, type: str, content: str) -> str:
     d = get_memory_dir()
     filename = f"{type}_{_slugify(name)}.md"
     text = format_frontmatter({"name": name, "description": description, "type": type}, content)
-    (d / filename).write_text(text)
+    (d / filename).write_text(text, encoding="utf-8")
     _update_memory_index()
     return filename
 
@@ -114,19 +115,20 @@ def delete_memory(filename: str) -> bool:
 # ─── MEMORY.md 索引 ─────────────────────────────────────────
 
 
-def _update_memory_index() -> None:
-    memories = list_memories()
+def _update_memory_index(memory_dir: Path | None = None) -> None:
+    d = memory_dir or get_memory_dir()
+    memories = list_memories(d)
     lines = ["# Memory Index", ""]
     for m in memories:
         lines.append(f"- **[{m.name}]({m.filename})** ({m.type}) — {m.description}")
-    _get_index_path().write_text("\n".join(lines))
+    (d / "MEMORY.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def load_memory_index() -> str:
     index_path = _get_index_path()
     if not index_path.exists():
         return ""
-    content = index_path.read_text()
+    content = index_path.read_text(encoding="utf-8", errors="replace")
     lines = content.split("\n")
     if len(lines) > MAX_INDEX_LINES:
         content = "\n".join(lines[:MAX_INDEX_LINES]) + "\n\n[... truncated, too many memory entries ...]"
@@ -163,7 +165,7 @@ def scan_memory_headers() -> list[MemoryHeader]:
             continue
         try:
             stat = f.stat()
-            raw = f.read_text()
+            raw = f.read_text(encoding="utf-8", errors="replace")
             first30 = "\n".join(raw.split("\n")[:30])
             result = parse_frontmatter(first30)
             meta = result.meta
@@ -267,7 +269,7 @@ async def select_relevant_memories(
 
         result: list[RelevantMemory] = []
         for h in selected:
-            content = Path(h.file_path).read_text()
+            content = Path(h.file_path).read_text(encoding="utf-8", errors="replace")
             if len(content.encode()) > MAX_MEMORY_BYTES_PER_FILE:
                 content = content[:MAX_MEMORY_BYTES_PER_FILE] + "\n\n[... truncated, memory file too large ...]"
             freshness = memory_freshness_warning(h.mtime_ms)

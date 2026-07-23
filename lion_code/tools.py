@@ -215,7 +215,7 @@ def _write_file(inp: dict) -> str:
     try:
         path = Path(inp["file_path"])
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(inp["content"])
+        path.write_text(inp["content"], encoding="utf-8")
         _auto_update_memory_index(str(path))
         lines = inp["content"].split("\n")
         line_count = len(lines)
@@ -236,7 +236,7 @@ def _auto_update_memory_index(file_path: str) -> None:
                 if f.name == "MEMORY.md":
                     continue
                 try:
-                    raw = f.read_text()
+                    raw = f.read_text(encoding="utf-8", errors="replace")
                     name_match = re.search(r"^name:\s*(.+)$", raw, re.MULTILINE)
                     type_match = re.search(r"^type:\s*(.+)$", raw, re.MULTILINE)
                     desc_match = re.search(r"^description:\s*(.+)$", raw, re.MULTILINE)
@@ -247,7 +247,7 @@ def _auto_update_memory_index(file_path: str) -> None:
                         lines.append(f"- **[{n}]({f.name})** ({t}) — {d}")
                 except Exception:
                     pass
-            (mem_path / "MEMORY.md").write_text("\n".join(lines))
+            (mem_path / "MEMORY.md").write_text("\n".join(lines), encoding="utf-8")
     except Exception:
         pass
 
@@ -289,7 +289,7 @@ def _generate_diff(old_content: str, old_string: str, new_string: str) -> str:
 def _edit_file(inp: dict) -> str:
     try:
         path = Path(inp["file_path"])
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8", errors="replace")
 
         actual = _find_actual_string(content, inp["old_string"])
         if not actual:
@@ -300,7 +300,7 @@ def _edit_file(inp: dict) -> str:
             return f"Error: old_string found {count} times in {inp['file_path']}. Must be unique."
 
         new_content = content.replace(actual, inp["new_string"], 1)
-        path.write_text(new_content)
+        path.write_text(new_content, encoding="utf-8")
 
         diff = _generate_diff(content, actual, inp["new_string"])
         quote_note = " (matched via quote normalization)" if actual != inp["old_string"] else ""
@@ -388,13 +388,15 @@ def _grep_python(pattern: str, directory: str, include: str | None) -> str:
             if name.startswith(".") or name == "node_modules":
                 continue
             full = os.path.join(d, name)
+            if os.path.islink(full):
+                continue
             if os.path.isdir(full):
                 walk(full)
                 continue
             if include_pattern and not fnmatch.fnmatch(name, include_pattern):
                 continue
             try:
-                text = Path(full).read_text(errors="replace")
+                text = Path(full).read_text(encoding="utf-8", errors="replace")
                 for i, line in enumerate(text.split("\n")):
                     if regex.search(line):
                         # 最多展示 100 个匹配，同时保留遗漏数量供模型判断完整性。

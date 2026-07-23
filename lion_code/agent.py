@@ -28,6 +28,7 @@ from .tools import (
 from .memory import (
     start_memory_prefetch,
     format_memories_for_injection,
+    get_memory_dir,
     MemoryPrefetch,
 )
 from .autonomy import (
@@ -543,6 +544,41 @@ class Agent:
 
     async def compact(self) -> None:
         await self._compact_conversation()
+
+    async def dream(self) -> str:
+        """显式整合当前项目 Memory，并返回本次文件变更摘要。"""
+        if self.permission_mode == "plan":
+            raise RuntimeError("Plan 模式为只读，退出后才能执行 /dream")
+
+        from .dream import DreamCoordinator
+
+        print_sub_agent_start("dream", "consolidate project memory")
+        try:
+            result = await DreamCoordinator(self).run()
+        finally:
+            print_sub_agent_end("dream", "consolidate project memory")
+        if result.created or result.updated or result.deleted:
+            self._refresh_memory_context_after_dream(
+                result.created + result.updated + result.deleted
+            )
+        return result.summary()
+
+    def _refresh_memory_context_after_dream(self, filenames: list[str]) -> None:
+        """丢弃旧预取，并让本会话后续请求看到 Dream 后的索引和文件内容。"""
+        if self._memory_prefetch and not self._memory_prefetch.settled:
+            self._memory_prefetch.task.cancel()
+        self._memory_prefetch = None
+        memory_dir = get_memory_dir()
+        for filename in filenames:
+            self._already_surfaced_memories.discard(str(memory_dir / filename))
+
+        if not self._dynamic_system_context:
+            return
+        self._dynamic_system_context = build_dynamic_system_context()
+        self._base_system_prompt = self._static_system_prompt + "\n\n" + self._dynamic_system_context
+        self._system_prompt = self._base_system_prompt
+        if self.use_openai and self._openai_messages and self._openai_messages[0].get("role") == "system":
+            self._openai_messages[0]["content"] = self._system_prompt
 
     async def learn_from_current_session(self) -> str:
         """运行一次内置 Meta-Skill，并按其结论直接沉淀当前会话经验。"""
