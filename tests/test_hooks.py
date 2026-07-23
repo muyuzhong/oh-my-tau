@@ -15,6 +15,10 @@ from unittest.mock import AsyncMock, patch
 from lion_code import hooks as hook_module
 from lion_code.agent import Agent
 from lion_code.hooks import (
+    HookChainResult,
+    HookErrorKind,
+    HookOutcome,
+    HookResult,
     HookSource,
     describe_project_hook,
     is_project_hook_trusted,
@@ -232,13 +236,18 @@ print(json.dumps({"action": "allow"}))
 """,
         )
 
-        denial = await run_pre_tool_use_hooks(
+        chain = await run_pre_tool_use_hooks(
             [self._user_python_hook(script, matcher="run_*")],
             "run_shell",
             {"command": "echo 你好"},
         )
 
-        self.assertIsNone(denial)
+        self.assertEqual(chain.outcome, HookOutcome.ALLOW)
+        self.assertIsNone(chain.terminal_result)
+        self.assertEqual(len(chain.executed), 1)
+        self.assertEqual(chain.executed[0].hook_id, "test-hook")
+        self.assertEqual(chain.executed[0].outcome, HookOutcome.ALLOW)
+        self.assertGreaterEqual(chain.executed[0].duration_ms, 0)
         payload = json.loads((self.root / "payload.json").read_text(encoding="utf-8"))
         self.assertEqual(payload["event"], "PreToolUse")
         self.assertEqual(payload["tool_name"], "run_shell")
@@ -258,9 +267,9 @@ print(json.dumps({"action": "allow"}))
         )
         hook = _hook([sys.executable, str(script), "value | not-a-pipe"])
 
-        denial = await run_pre_tool_use_hooks([hook], "run_shell", {})
+        chain = await run_pre_tool_use_hooks([hook], "run_shell", {})
 
-        self.assertIsNone(denial)
+        self.assertEqual(chain.outcome, HookOutcome.ALLOW)
         argv = json.loads((self.root / "argv.json").read_text(encoding="utf-8"))
         self.assertEqual(argv, ["value | not-a-pipe"])
 
@@ -270,9 +279,9 @@ print(json.dumps({"action": "allow"}))
         )
         hook = _hook(_python_shell_command(script), shell=True)
 
-        denial = await run_pre_tool_use_hooks([hook], "run_shell", {})
+        chain = await run_pre_tool_use_hooks([hook], "run_shell", {})
 
-        self.assertIsNone(denial)
+        self.assertEqual(chain.outcome, HookOutcome.ALLOW)
 
     async def test_hook_receives_only_safe_and_explicit_environment(self):
         script = self._write_script(
@@ -295,9 +304,9 @@ print(json.dumps({"action": "allow"}))
         }
 
         with patch.dict(os.environ, injected):
-            denial = await run_pre_tool_use_hooks([hook], "run_shell", {})
+            chain = await run_pre_tool_use_hooks([hook], "run_shell", {})
 
-        self.assertIsNone(denial)
+        self.assertEqual(chain.outcome, HookOutcome.ALLOW)
         child_env = json.loads((self.root / "env.json").read_text(encoding="utf-8"))
         self.assertNotIn("OPENAI_API_KEY", child_env)
         self.assertNotIn("ANTHROPIC_API_KEY", child_env)
@@ -310,12 +319,17 @@ print(json.dumps({"action": "allow"}))
 
     async def test_non_matching_hook_is_not_started(self):
         hook = _hook(["command-that-does-not-exist"], matcher="write_file")
-        denial = await run_pre_tool_use_hooks(
+        chain = await run_pre_tool_use_hooks(
             [hook], "run_shell", {"command": "echo hi"}
         )
-        self.assertIsNone(denial)
+        self.assertEqual(chain.outcome, HookOutcome.ALLOW)
+        self.assertEqual(chain.executed, ())
 
     async def test_deny_stops_later_hooks(self):
+        allow = self._write_script(
+            "allow_first.py",
+            'print("{\\"action\\":\\"allow\\"}")',
+        )
         deny = self._write_script(
             "deny.py",
             'print("{\\"action\\":\\"deny\\",\\"reason\\":\\"blocked\\"}")',
@@ -325,31 +339,67 @@ print(json.dumps({"action": "allow"}))
             'from pathlib import Path\nPath("later-ran").touch()\nprint("{\\"action\\":\\"allow\\"}")',
         )
 
-        denial = await run_pre_tool_use_hooks(
-            [self._user_python_hook(deny), self._user_python_hook(later)],
+        chain = await run_pre_tool_use_hooks(
+            [
+                self._user_python_hook(allow, hook_id="allow"),
+                self._user_python_hook(deny, hook_id="deny"),
+                self._user_python_hook(later, hook_id="later"),
+            ],
             "run_shell",
             {"command": "echo hi"},
         )
 
-        self.assertEqual(denial, "blocked")
+        self.assertEqual(chain.outcome, HookOutcome.DENY)
+        self.assertEqual(chain.terminal_result.reason, "blocked")
+        self.assertIsNone(chain.terminal_result.error_kind)
+        self.assertEqual([item.hook_id for item in chain.executed], ["allow", "deny"])
+        self.assertIs(chain.terminal_result, chain.executed[-1])
         self.assertFalse((self.root / "later-ran").exists())
 
-    async def test_process_failures_are_denied(self):
+    async def test_process_failures_are_structured_errors(self):
         invalid_json = self._write_script("invalid.py", 'print("not json")')
         nonzero = self._write_script(
             "nonzero.py",
             'import sys\nsys.stderr.write("boom")\nsys.exit(7)',
         )
 
-        invalid_result = await run_pre_tool_use_hooks(
-            [self._user_python_hook(invalid_json)], "run_shell", {}
+        invalid_chain = await run_pre_tool_use_hooks(
+            [
+                self._user_python_hook(invalid_json, hook_id="invalid"),
+                _hook(["command-that-must-not-run"], hook_id="later"),
+            ],
+            "run_shell",
+            {},
         )
-        nonzero_result = await run_pre_tool_use_hooks(
+        nonzero_chain = await run_pre_tool_use_hooks(
             [self._user_python_hook(nonzero)], "run_shell", {}
         )
 
-        self.assertIn("invalid JSON", invalid_result)
-        self.assertIn("exited with code 7: boom", nonzero_result)
+        self.assertEqual(invalid_chain.outcome, HookOutcome.ERROR)
+        self.assertEqual(
+            invalid_chain.terminal_result.error_kind,
+            HookErrorKind.INVALID_OUTPUT,
+        )
+        self.assertIn("invalid JSON", invalid_chain.terminal_result.reason)
+        self.assertEqual([item.hook_id for item in invalid_chain.executed], ["invalid"])
+
+        self.assertEqual(nonzero_chain.outcome, HookOutcome.ERROR)
+        self.assertEqual(
+            nonzero_chain.terminal_result.error_kind,
+            HookErrorKind.NONZERO_EXIT,
+        )
+        self.assertEqual(nonzero_chain.terminal_result.exit_code, 7)
+        self.assertIn("exited with code 7: boom", nonzero_chain.terminal_result.reason)
+
+    async def test_spawn_failure_is_a_structured_error(self):
+        chain = await run_pre_tool_use_hooks(
+            [_hook(["command-that-does-not-exist"])], "run_shell", {}
+        )
+
+        self.assertEqual(chain.outcome, HookOutcome.ERROR)
+        self.assertEqual(chain.terminal_result.error_kind, HookErrorKind.SPAWN_ERROR)
+        self.assertIn("failed to start", chain.terminal_result.reason)
+        self.assertEqual(chain.executed, (chain.terminal_result,))
 
     async def test_project_hook_requires_and_persists_explicit_trust(self):
         script, hook = self._write_project_hook(
@@ -361,16 +411,20 @@ print(json.dumps({"action": "allow"}))
 """
         )
 
-        denial = await run_pre_tool_use_hooks([hook], "run_shell", {})
-        self.assertIn("is not trusted", denial)
+        untrusted_chain = await run_pre_tool_use_hooks([hook], "run_shell", {})
+        self.assertEqual(untrusted_chain.outcome, HookOutcome.DENY)
+        self.assertEqual(untrusted_chain.terminal_result.hook_id, "project-policy")
+        self.assertIn("is not trusted", untrusted_chain.terminal_result.reason)
+        self.assertIsNone(untrusted_chain.terminal_result.error_kind)
+        self.assertEqual(untrusted_chain.executed, ())
         self.assertFalse((self.root / "project-hook-ran").exists())
 
         confirm = AsyncMock(return_value=True)
-        self.assertIsNone(
-            await run_pre_tool_use_hooks(
-                [hook], "run_shell", {}, confirm_trust=confirm
-            )
+        approved_chain = await run_pre_tool_use_hooks(
+            [hook], "run_shell", {}, confirm_trust=confirm
         )
+        self.assertEqual(approved_chain.outcome, HookOutcome.ALLOW)
+        self.assertEqual(len(approved_chain.executed), 1)
         confirm.assert_awaited_once()
         self.assertTrue((self.root / "project-hook-ran").exists())
 
@@ -385,11 +439,10 @@ print(json.dumps({"action": "allow"}))
         self.assertIn("trusted_at", record)
 
         already_trusted = AsyncMock(return_value=False)
-        self.assertIsNone(
-            await run_pre_tool_use_hooks(
-                [hook], "run_shell", {}, confirm_trust=already_trusted
-            )
+        trusted_chain = await run_pre_tool_use_hooks(
+            [hook], "run_shell", {}, confirm_trust=already_trusted
         )
+        self.assertEqual(trusted_chain.outcome, HookOutcome.ALLOW)
         already_trusted.assert_not_awaited()
         self.assertTrue(script.is_file())
 
@@ -400,13 +453,27 @@ print(json.dumps({"action": "allow"}))
         )
         confirm = AsyncMock(return_value=False)
 
-        denial = await run_pre_tool_use_hooks(
+        chain = await run_pre_tool_use_hooks(
             [hook], "run_shell", {}, confirm_trust=confirm
         )
 
-        self.assertIn("was not trusted", denial)
+        self.assertEqual(chain.outcome, HookOutcome.DENY)
+        self.assertIn("was not trusted", chain.terminal_result.reason)
         prompt = confirm.await_args.args[0]
         self.assertIn("WARNING: shell=true", prompt)
+
+    async def test_trust_prompt_failure_is_an_infrastructure_error(self):
+        _, hook = self._write_project_hook()
+        confirm = AsyncMock(side_effect=RuntimeError("prompt unavailable"))
+
+        chain = await run_pre_tool_use_hooks(
+            [hook], "run_shell", {}, confirm_trust=confirm
+        )
+
+        self.assertEqual(chain.outcome, HookOutcome.ERROR)
+        self.assertEqual(chain.terminal_result.error_kind, HookErrorKind.TRUST_ERROR)
+        self.assertIn("prompt unavailable", chain.terminal_result.reason)
+        self.assertEqual(chain.executed, ())
 
     def test_trust_invalidates_on_command_config_script_or_root_change(self):
         script, original_hook = self._write_project_hook()
@@ -469,13 +536,15 @@ print('{"action":"allow"}')
 """,
         )
 
-        denial = await run_pre_tool_use_hooks(
+        chain = await run_pre_tool_use_hooks(
             [self._user_python_hook(script)],
             "run_shell",
             {"command": "x" * hook_module.MAX_HOOK_INPUT_BYTES},
         )
 
-        self.assertIn("input limit of 262144 bytes", denial)
+        self.assertEqual(chain.outcome, HookOutcome.ERROR)
+        self.assertEqual(chain.terminal_result.error_kind, HookErrorKind.INPUT_LIMIT)
+        self.assertIn("input exceeded 262144 bytes", chain.terminal_result.reason)
         self.assertFalse((self.root / "input-limit-hook-ran").exists())
 
     async def test_stdout_limit_aborts_hook_promptly(self):
@@ -496,11 +565,13 @@ time.sleep(10)
             "_kill_and_reap",
             wraps=hook_module._kill_and_reap,
         ) as kill_and_reap:
-            denial = await run_pre_tool_use_hooks(
+            chain = await run_pre_tool_use_hooks(
                 [self._user_python_hook(script, timeout_ms=5000)], "run_shell", {}
             )
 
-        self.assertIn("output limit of 65536 bytes", denial)
+        self.assertEqual(chain.outcome, HookOutcome.ERROR)
+        self.assertEqual(chain.terminal_result.error_kind, HookErrorKind.OUTPUT_LIMIT)
+        self.assertIn("output exceeded 65536 bytes", chain.terminal_result.reason)
         kill_and_reap.assert_awaited_once()
         self.assertLess(time.monotonic() - started, 2)
 
@@ -516,13 +587,15 @@ time.sleep(10)
 """,
         )
 
-        denial = await run_pre_tool_use_hooks(
+        chain = await run_pre_tool_use_hooks(
             [self._user_python_hook(script, timeout_ms=5000)], "run_shell", {}
         )
 
-        self.assertIn("output limit of 16384 bytes", denial)
+        self.assertEqual(chain.outcome, HookOutcome.ERROR)
+        self.assertEqual(chain.terminal_result.error_kind, HookErrorKind.OUTPUT_LIMIT)
+        self.assertIn("output exceeded 16384 bytes", chain.terminal_result.reason)
 
-    async def test_stream_read_failure_is_denied_without_escaping(self):
+    async def test_stream_read_failure_is_structured_without_escaping(self):
         script = self._write_script("read_failure.py", "import time\ntime.sleep(10)\n")
 
         with patch.object(
@@ -530,21 +603,25 @@ time.sleep(10)
             "read_limited",
             AsyncMock(side_effect=OSError("read failed")),
         ):
-            denial = await run_pre_tool_use_hooks(
+            chain = await run_pre_tool_use_hooks(
                 [self._user_python_hook(script, timeout_ms=5000)], "run_shell", {}
             )
 
-        self.assertIn("failed during I/O: read failed", denial)
+        self.assertEqual(chain.outcome, HookOutcome.ERROR)
+        self.assertEqual(chain.terminal_result.error_kind, HookErrorKind.IO_ERROR)
+        self.assertIn("I/O failed: read failed", chain.terminal_result.reason)
 
     async def test_timeout_kills_process_tree_promptly(self):
         script = self._write_script("sleep.py", "import time\ntime.sleep(10)\n")
         started = time.monotonic()
 
-        denial = await run_pre_tool_use_hooks(
+        chain = await run_pre_tool_use_hooks(
             [self._user_python_hook(script, timeout_ms=50)], "run_shell", {}
         )
 
-        self.assertIn("timed out after 50ms", denial)
+        self.assertEqual(chain.outcome, HookOutcome.ERROR)
+        self.assertEqual(chain.terminal_result.error_kind, HookErrorKind.TIMEOUT)
+        self.assertEqual(chain.terminal_result.reason, "Hook timed out after 50ms")
         self.assertLess(time.monotonic() - started, 2)
 
     async def test_cancellation_reaps_process_tree(self):
@@ -571,7 +648,18 @@ class TestAgentHookIntegration(unittest.IsolatedAsyncioTestCase):
         with patch("lion_code.agent.load_pre_tool_use_hooks", return_value=[]):
             agent = Agent(api_key="test-key")
 
-        hook_runner = AsyncMock(return_value="blocked by policy")
+        terminal = HookResult(
+            hook_id="protect-shell",
+            outcome=HookOutcome.DENY,
+            reason="blocked by policy",
+        )
+        hook_runner = AsyncMock(
+            return_value=HookChainResult(
+                outcome=HookOutcome.DENY,
+                terminal_result=terminal,
+                executed=(terminal,),
+            )
+        )
         tool_runner = AsyncMock(return_value="executed")
         with (
             patch("lion_code.agent.run_pre_tool_use_hooks", hook_runner),
@@ -579,9 +667,46 @@ class TestAgentHookIntegration(unittest.IsolatedAsyncioTestCase):
         ):
             result = await agent._execute_tool_call("run_shell", {"command": "echo hi"})
 
-        self.assertEqual(result, "Action denied by PreToolUse hook: blocked by policy")
+        self.assertEqual(
+            result,
+            'Action denied by hook "protect-shell":\n'
+            "blocked by policy\n\n"
+            "A configured policy rejected this action. Adjust the action.",
+        )
         hook_runner.assert_awaited_once()
         self.assertIs(hook_runner.await_args.kwargs["confirm_trust"].__self__, agent)
+        tool_runner.assert_not_awaited()
+
+    async def test_hook_error_is_not_presented_as_user_policy(self):
+        with patch("lion_code.agent.load_pre_tool_use_hooks", return_value=[]):
+            agent = Agent(api_key="test-key")
+
+        terminal = HookResult(
+            hook_id="protect-shell",
+            outcome=HookOutcome.ERROR,
+            reason="Hook timed out after 5000ms",
+            error_kind=HookErrorKind.TIMEOUT,
+        )
+        hook_runner = AsyncMock(
+            return_value=HookChainResult(
+                outcome=HookOutcome.ERROR,
+                terminal_result=terminal,
+                executed=(terminal,),
+            )
+        )
+        tool_runner = AsyncMock(return_value="executed")
+        with (
+            patch("lion_code.agent.run_pre_tool_use_hooks", hook_runner),
+            patch("lion_code.agent.execute_tool", tool_runner),
+        ):
+            result = await agent._execute_tool_call("run_shell", {"command": "echo hi"})
+
+        self.assertEqual(
+            result,
+            'Tool call blocked because hook "protect-shell" failed:\n'
+            "Hook timed out after 5000ms\n\n"
+            "The hook system failed. Do not interpret this as user intent.",
+        )
         tool_runner.assert_not_awaited()
 
     async def test_dont_ask_mode_rejects_hook_trust_without_prompt(self):
