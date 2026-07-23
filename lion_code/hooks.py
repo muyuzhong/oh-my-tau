@@ -11,6 +11,7 @@ import shlex
 import signal
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -45,6 +46,45 @@ TrustConfirm = Callable[[str], Awaitable[bool]]
 class HookSource(str, Enum):
     USER = "user"
     PROJECT = "project"
+
+
+class HookOutcome(str, Enum):
+    ALLOW = "allow"
+    DENY = "deny"
+    ERROR = "error"
+
+
+class HookErrorKind(str, Enum):
+    SPAWN_ERROR = "spawn_error"
+    TIMEOUT = "timeout"
+    NONZERO_EXIT = "nonzero_exit"
+    INVALID_OUTPUT = "invalid_output"
+    OUTPUT_LIMIT = "output_limit"
+    CANCELLED = "cancelled"
+    INPUT_LIMIT = "input_limit"
+    IO_ERROR = "io_error"
+    TRUST_ERROR = "trust_error"
+
+
+@dataclass(frozen=True)
+class HookResult:
+    """单个 Hook 的策略结果或基础设施故障。"""
+
+    hook_id: str
+    outcome: HookOutcome
+    reason: str | None = None
+    error_kind: HookErrorKind | None = None
+    exit_code: int | None = None
+    duration_ms: float = 0
+
+
+@dataclass(frozen=True)
+class HookChainResult:
+    """Hook 链的终态，以及实际启动过的 Hook 结果。"""
+
+    outcome: HookOutcome
+    terminal_result: HookResult | None
+    executed: tuple[HookResult, ...]
 
 
 class HookOutputLimitExceeded(Exception):
@@ -344,30 +384,44 @@ def _format_trust_prompt(hook: HookConfig, descriptor: HookTrustDescriptor) -> s
 async def _authorize_project_hook(
     hook: HookConfig,
     confirm_trust: TrustConfirm | None,
-) -> HookTrustDescriptor | str:
+) -> HookTrustDescriptor | HookResult:
+    started = time.perf_counter()
+
+    def failure(reason: str, *, denied: bool = False) -> HookResult:
+        return HookResult(
+            hook_id=hook["id"],
+            outcome=HookOutcome.DENY if denied else HookOutcome.ERROR,
+            reason=reason,
+            error_kind=None if denied else HookErrorKind.TRUST_ERROR,
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
+
     descriptor = describe_project_hook(hook)
     try:
         if is_project_hook_trusted(descriptor):
             return descriptor
     except ValueError as exc:
-        return f"{hook['label']} trust check failed: {exc}"
+        return failure(f"Project Hook trust check failed: {exc}")
 
     if confirm_trust is None:
-        return f"{hook['label']} is not trusted; project Hooks require explicit approval"
+        return failure(
+            "Project Hook is not trusted; explicit approval is required",
+            denied=True,
+        )
     try:
         approved = await confirm_trust(_format_trust_prompt(hook, descriptor))
     except Exception as exc:
-        return f"{hook['label']} trust prompt failed: {exc}"
+        return failure(f"Project Hook trust prompt failed: {exc}")
     if not approved:
-        return f"{hook['label']} was not trusted by the user"
+        return failure("Project Hook was not trusted by the user", denied=True)
 
     current_descriptor = describe_project_hook(hook)
     if current_descriptor != descriptor:
-        return f"{hook['label']} changed while trust approval was pending"
+        return failure("Project Hook changed while trust approval was pending")
     try:
         trust_project_hook(descriptor)
     except (OSError, ValueError) as exc:
-        return f"{hook['label']} could not save trust: {exc}"
+        return failure(f"Project Hook could not save trust: {exc}")
     return descriptor
 
 
@@ -455,10 +509,35 @@ def _decode_diagnostic(data: bytes) -> str:
     return data[:MAX_HOOK_ERROR_BYTES].decode("utf-8", errors="replace").strip()
 
 
-async def _run_command_hook(hook: HookConfig, payload: bytes, cwd: Path) -> str | None:
-    label = hook["label"]
+async def _run_command_hook(
+    hook: HookConfig,
+    payload: bytes,
+    cwd: Path,
+) -> HookResult:
+    started = time.perf_counter()
+
+    def finish(
+        outcome: HookOutcome,
+        *,
+        reason: str | None = None,
+        error_kind: HookErrorKind | None = None,
+        exit_code: int | None = None,
+    ) -> HookResult:
+        return HookResult(
+            hook_id=hook["id"],
+            outcome=outcome,
+            reason=reason,
+            error_kind=error_kind,
+            exit_code=exit_code,
+            duration_ms=(time.perf_counter() - started) * 1000,
+        )
+
     if len(payload) > MAX_HOOK_INPUT_BYTES:
-        return f"{label} exceeded Hook input limit of {MAX_HOOK_INPUT_BYTES} bytes"
+        return finish(
+            HookOutcome.ERROR,
+            reason=f"Hook input exceeded {MAX_HOOK_INPUT_BYTES} bytes",
+            error_kind=HookErrorKind.INPUT_LIMIT,
+        )
 
     spawn_options = (
         {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
@@ -485,7 +564,11 @@ async def _run_command_hook(hook: HookConfig, payload: bytes, cwd: Path) -> str 
                 **process_options,
             )
     except Exception as exc:
-        return f"{label} failed to start: {exc}"
+        return finish(
+            HookOutcome.ERROR,
+            reason=f"Hook failed to start: {exc}",
+            error_kind=HookErrorKind.SPAWN_ERROR,
+        )
 
     assert process.stdin is not None
     assert process.stdout is not None
@@ -501,39 +584,71 @@ async def _run_command_hook(hook: HookConfig, payload: bytes, cwd: Path) -> str 
             stdout, stderr, _, _ = await asyncio.gather(*tasks)
     except TimeoutError:
         await _abort_hook_tasks(process, tasks)
-        return f"{label} timed out after {hook['timeout_ms']:g}ms"
+        return finish(
+            HookOutcome.ERROR,
+            reason=f"Hook timed out after {hook['timeout_ms']:g}ms",
+            error_kind=HookErrorKind.TIMEOUT,
+        )
     except HookOutputLimitExceeded as exc:
         await _abort_hook_tasks(process, tasks)
-        return f"{label} exceeded Hook output limit of {exc.limit} bytes"
+        return finish(
+            HookOutcome.ERROR,
+            reason=f"Hook output exceeded {exc.limit} bytes",
+            error_kind=HookErrorKind.OUTPUT_LIMIT,
+        )
     except asyncio.CancelledError:
         await _abort_hook_tasks(process, tasks)
         raise
     except Exception as exc:
         await _abort_hook_tasks(process, tasks)
-        return f"{label} failed during I/O: {exc}"
+        return finish(
+            HookOutcome.ERROR,
+            reason=f"Hook I/O failed: {exc}",
+            error_kind=HookErrorKind.IO_ERROR,
+        )
 
     if process.returncode != 0:
         detail = _decode_diagnostic(stderr)
         suffix = f": {detail}" if detail else ""
-        return f"{label} exited with code {process.returncode}{suffix}"
+        return finish(
+            HookOutcome.ERROR,
+            reason=f"Hook exited with code {process.returncode}{suffix}",
+            error_kind=HookErrorKind.NONZERO_EXIT,
+            exit_code=process.returncode,
+        )
     try:
         result = json.loads(stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return f"{label} returned invalid JSON: {exc}"
+        return finish(
+            HookOutcome.ERROR,
+            reason=f"Hook returned invalid JSON: {exc}",
+            error_kind=HookErrorKind.INVALID_OUTPUT,
+        )
     if not isinstance(result, dict):
-        return f"{label} must return a JSON object"
+        return finish(
+            HookOutcome.ERROR,
+            reason="Hook must return a JSON object",
+            error_kind=HookErrorKind.INVALID_OUTPUT,
+        )
 
     action = result.get("action")
     if action == "allow":
-        return None
+        return finish(HookOutcome.ALLOW)
     if action == "deny":
         reason = result.get("reason")
-        return (
-            reason
-            if isinstance(reason, str) and reason.strip()
-            else f"{label} denied the tool call"
+        return finish(
+            HookOutcome.DENY,
+            reason=(
+                reason
+                if isinstance(reason, str) and reason.strip()
+                else "Hook denied the tool call without a reason"
+            ),
         )
-    return f"{label} returned unsupported action: {action!r}"
+    return finish(
+        HookOutcome.ERROR,
+        reason=f"Hook returned unsupported action: {action!r}",
+        error_kind=HookErrorKind.INVALID_OUTPUT,
+    )
 
 
 async def run_pre_tool_use_hooks(
@@ -542,9 +657,14 @@ async def run_pre_tool_use_hooks(
     tool_input: dict,
     *,
     confirm_trust: TrustConfirm | None = None,
-) -> str | None:
-    """顺序执行匹配 Hook；返回拒绝原因，全部放行时返回 None。"""
+) -> HookChainResult:
+    """顺序执行匹配 Hook；策略拒绝或执行故障都会立即停止。"""
     cwd = Path.cwd().resolve()
+    executed: list[HookResult] = []
+
+    def stop(result: HookResult) -> HookChainResult:
+        return HookChainResult(result.outcome, result, tuple(executed))
+
     payload = json.dumps(
         {
             "event": "PreToolUse",
@@ -561,14 +681,31 @@ async def run_pre_tool_use_hooks(
             continue
         if hook["source"] is HookSource.PROJECT:
             if hook["project_root"] != str(cwd):
-                return f"{hook['label']} belongs to a different project root"
+                terminal = HookResult(
+                    hook_id=hook["id"],
+                    outcome=HookOutcome.ERROR,
+                    reason="Project Hook belongs to a different project root",
+                    error_kind=HookErrorKind.TRUST_ERROR,
+                )
+                return stop(terminal)
             authorization = await _authorize_project_hook(hook, confirm_trust)
-            if isinstance(authorization, str):
-                return authorization
+            if isinstance(authorization, HookResult):
+                return stop(authorization)
             if describe_project_hook(hook) != authorization:
-                return f"{hook['label']} changed after trust approval"
+                terminal = HookResult(
+                    hook_id=hook["id"],
+                    outcome=HookOutcome.ERROR,
+                    reason="Project Hook changed after trust approval",
+                    error_kind=HookErrorKind.TRUST_ERROR,
+                )
+                return stop(terminal)
 
-        denial = await _run_command_hook(hook, payload, cwd)
-        if denial is not None:
-            return denial
-    return None
+        result = await _run_command_hook(hook, payload, cwd)
+        executed.append(result)
+        if result.outcome is not HookOutcome.ALLOW:
+            return stop(result)
+    return HookChainResult(
+        outcome=HookOutcome.ALLOW,
+        terminal_result=None,
+        executed=tuple(executed),
+    )
