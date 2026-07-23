@@ -32,82 +32,11 @@ IS_WIN = sys.platform == "win32"
 
 ToolDef = dict  # Anthropic 工具 schema；OpenAI 格式在 Agent 层转换。
 
-# ─── 工具定义 ───────────────────────────────────────────────
+# ─── 兼容内部工具定义 ────────────────────────────────────────
+# 普通工具的 Schema 已与执行函数一起迁入 tooling/builtin.py；这里仅暂存尚未
+# 注册化的内部工具，供 PR 2 之前的旧入口使用。
 
-tool_definitions: list[ToolDef] = [
-    {
-        "name": "read_file",
-        "description": "Read the contents of a file. Returns the file content with line numbers.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "The path to the file to read"},
-            },
-            "required": ["file_path"],
-        },
-    },
-    {
-        "name": "write_file",
-        "description": "Write content to a file. Creates the file if it doesn't exist, overwrites if it does.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "The path to the file to write"},
-                "content": {"type": "string", "description": "The content to write to the file"},
-            },
-            "required": ["file_path", "content"],
-        },
-    },
-    {
-        "name": "edit_file",
-        "description": "Edit a file by replacing an exact string match with new content. The old_string must match exactly (including whitespace and indentation).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "The path to the file to edit"},
-                "old_string": {"type": "string", "description": "The exact string to find and replace"},
-                "new_string": {"type": "string", "description": "The string to replace it with"},
-            },
-            "required": ["file_path", "old_string", "new_string"],
-        },
-    },
-    {
-        "name": "list_files",
-        "description": "List files matching a glob pattern. Returns matching file paths.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": 'Glob pattern to match files (e.g., "**/*.ts", "src/**/*")'},
-                "path": {"type": "string", "description": "Base directory to search from. Defaults to current directory."},
-            },
-            "required": ["pattern"],
-        },
-    },
-    {
-        "name": "grep_search",
-        "description": "Search for a pattern in files. Returns matching lines with file paths and line numbers.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "The regex pattern to search for"},
-                "path": {"type": "string", "description": "Directory or file to search in. Defaults to current directory."},
-                "include": {"type": "string", "description": 'File glob pattern to include (e.g., "*.ts", "*.py")'},
-            },
-            "required": ["pattern"],
-        },
-    },
-    {
-        "name": "run_shell",
-        "description": "Execute a shell command and return its output. Use this for running tests, installing packages, git operations, etc.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "The shell command to execute"},
-                "timeout": {"type": "number", "description": "Timeout in milliseconds (default: 30000)"},
-            },
-            "required": ["command"],
-        },
-    },
+_LEGACY_INTERNAL_TOOL_DEFINITIONS: list[ToolDef] = [
     {
         "name": "skill",
         "description": "Invoke a registered skill by name. Skills are prompt templates loaded from .claude/skills/. Returns the skill's resolved prompt to follow.",
@@ -118,18 +47,6 @@ tool_definitions: list[ToolDef] = [
                 "args": {"type": "string", "description": "Optional arguments to pass to the skill"},
             },
             "required": ["skill_name"],
-        },
-    },
-    {
-        "name": "web_fetch",
-        "description": "Fetch a URL and return its content as text. For HTML pages, tags are stripped to return readable text. For JSON/text responses, content is returned directly.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "The URL to fetch"},
-                "max_length": {"type": "number", "description": "Maximum content length in characters (default 50000)"},
-            },
-            "required": ["url"],
         },
     },
     {
@@ -170,6 +87,9 @@ tool_definitions: list[ToolDef] = [
         },
     },
 ]
+
+# 模块加载末尾会从统一工具对象生成普通工具的兼容 Schema。
+tool_definitions: list[ToolDef]
 
 # ─── 延迟工具激活 ───────────────────────────────────────────
 
@@ -729,3 +649,12 @@ async def execute_tool(
 def reset_permission_cache() -> None:
     global _cached_rules
     _cached_rules = None
+
+
+# 保留旧导入入口，但普通工具 Schema 的唯一事实来源是 LionTool。
+from .tooling.builtin import create_builtin_tools  # noqa: E402
+
+tool_definitions = [
+    tool.to_anthropic_schema()
+    for tool in create_builtin_tools()
+] + _LEGACY_INTERNAL_TOOL_DEFINITIONS
